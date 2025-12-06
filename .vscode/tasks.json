@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "[Setup] 01. Install",
+      "type": "shell",
+      "command": "bash scripts/install.sh"
+    },
+    {
+      "label": "[Setup] 02. Build",
+      "type": "shell",
+      "command": "python -m build"
+    },
+    {
+      "label": "[CodeCheck] 01. Lint",
+      "type": "shell",
+      "command": "bash scripts/lint.sh"
+    },
+    {
+      "label": "[CodeCheck] 02. Lint Fix",
+      "type": "shell",
+      "command": "ruff check onnxparser/ --fix"
+    },
+    {
+      "label": "[CodeCheck] 03. Type Check",
+      "type": "shell",
+      "command": "bash scripts/typecheck.sh"
+    },
+    {
+      "label": "[CodeCheck] 04. Test",
+      "type": "shell",
+      "command": "bash scripts/test.sh"
+    },
+    {
+      "label": "[Generate] 01. Examples",
+      "type": "shell",
+      "command": "python scripts/generate_examples.py"
+    },
+    {
+      "label": "[CI] Full Check",
+      "type": "shell",
+      "command": "bash scripts/lint.sh && bash scripts/typecheck.sh && bash scripts/test.sh",
+      "group": {"kind": "build", "isDefault": true}
+    }
+  ]
+}

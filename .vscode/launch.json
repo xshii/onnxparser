@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "[Test] 01. All",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["tests/", "-v"]
+    },
+    {
+      "name": "[Test] 02. Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["${file}", "-v"]
+    },
+    {
+      "name": "[Run] 01. Transformer",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "examples/tiny_transformer.py"
+    },
+    {
+      "name": "[Run] 02. Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}"
+    }
+  ]
+}

@@ -22,7 +22,14 @@ dev = [
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
+    "onnxruntime>=1.15.0",
 ]
 
+[project.scripts]
+onnxparser-generate-examples = "scripts.generate_examples:main"
+
 [tool.setuptools.packages.find]
-exclude = ["tests", "tests.*", "examples"]
+exclude = ["tests", "tests.*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.onnx", "*.xlsx"]
