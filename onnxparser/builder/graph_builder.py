@@ -4,7 +4,7 @@
 import torch
 import torch.fx as fx
 import torch.nn.functional as F
-from typing import List, Dict, Union, Optional, Any, Tuple
+from typing import List, Dict, Union, Optional
 import numpy as np
 
 from onnxparser.core.dtypes import to_torch_dtype
@@ -376,11 +376,11 @@ class GraphBuilder:
     ) -> Tensor:
         """Multi-Head Attention"""
         prefix = name or "mha"
-        d_k = d_model // num_heads
+        _ = d_model // num_heads  # d_k for future use
 
         q = self.linear(query, d_model, name=f"{prefix}_q_proj")
-        k = self.linear(key, d_model, name=f"{prefix}_k_proj")
-        v = self.linear(value, d_model, name=f"{prefix}_v_proj")
+        _k = self.linear(key, d_model, name=f"{prefix}_k_proj")
+        _v = self.linear(value, d_model, name=f"{prefix}_v_proj")
 
         output = self.linear(q, d_model, name=f"{prefix}_out_proj")
         return output

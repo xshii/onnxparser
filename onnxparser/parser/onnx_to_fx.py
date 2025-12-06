@@ -6,8 +6,7 @@ import torch.fx as fx
 import torch.nn.functional as F
 import onnx
 from onnx import numpy_helper
-import numpy as np
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Callable
 
 from onnxparser.core.ops import ONNX_TO_TORCH, is_special_op
 from onnxparser.core.dtypes import ONNX_TO_TORCH_DTYPE

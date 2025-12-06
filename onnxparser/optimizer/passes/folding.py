@@ -3,7 +3,7 @@
 
 import torch
 import torch.fx as fx
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 
 def constant_folding(gm: fx.GraphModule) -> fx.GraphModule:

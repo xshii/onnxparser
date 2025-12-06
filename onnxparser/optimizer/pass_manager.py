@@ -77,7 +77,6 @@ class PassManager:
     def run(self, gm: fx.GraphModule) -> fx.GraphModule:
         """Run all applicable passes on the graph"""
         self._results = []
-        original_node_count = len(list(gm.graph.nodes))
 
         for name, pass_fn, pass_level in self._passes:
             if pass_level.value > self.level.value:
@@ -101,8 +100,6 @@ class PassManager:
                     success=False,
                     error=str(e),
                 ))
-
-        final_node_count = len(list(gm.graph.nodes))
 
         return gm
 

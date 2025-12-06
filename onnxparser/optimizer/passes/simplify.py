@@ -3,7 +3,6 @@
 
 import torch
 import torch.fx as fx
-from typing import List, Set
 
 
 def remove_identity(gm: fx.GraphModule) -> fx.GraphModule:
@@ -147,7 +146,7 @@ def _is_zero(arg, gm: fx.GraphModule) -> bool:
             val = _get_attr(gm, arg.target)
             if isinstance(val, torch.Tensor):
                 return torch.all(val == 0).item()
-        except:
+        except (AttributeError, RuntimeError):
             pass
     return False
 
@@ -161,7 +160,7 @@ def _is_one(arg, gm: fx.GraphModule) -> bool:
             val = _get_attr(gm, arg.target)
             if isinstance(val, torch.Tensor):
                 return torch.all(val == 1).item()
-        except:
+        except (AttributeError, RuntimeError):
             pass
     return False
 

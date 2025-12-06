@@ -3,7 +3,7 @@
 
 import torch
 import torch.fx as fx
-from typing import Dict, Any, Union, List
+from typing import Dict, Union
 
 
 class Runtime:

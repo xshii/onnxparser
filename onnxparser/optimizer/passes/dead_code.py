@@ -2,7 +2,6 @@
 """Dead Code Elimination Pass"""
 
 import torch.fx as fx
-from typing import Set
 
 
 def eliminate_dead_code(gm: fx.GraphModule) -> fx.GraphModule:
