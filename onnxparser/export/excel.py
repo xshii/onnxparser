@@ -4,8 +4,8 @@
 import torch
 import torch.fx as fx
 from openpyxl import Workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-from typing import Optional, Dict, Any, List
+from openpyxl.styles import Font, PatternFill
+from typing import Dict
 
 
 def export_excel(gm: fx.GraphModule, path: str) -> None:

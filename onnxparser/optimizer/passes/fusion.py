@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 import torch.fx as fx
-from typing import List, Optional, Callable
 
 
 def fuse_linear_relu(gm: fx.GraphModule) -> fx.GraphModule:
