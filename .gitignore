@@ -44,6 +44,9 @@ htmlcov/
 # Models
 models/*.onnx
 models/*.pt
+models/*.xlsx
+models/examples/
+models/onnx/
 
 # OS
 .DS_Store
