@@ -45,6 +45,7 @@ htmlcov/
 models/*.onnx
 models/*.pt
 models/*.xlsx
+models/*.html
 models/examples/
 models/onnx/
 
