@@ -9,6 +9,7 @@ from typing import Dict, Optional, List, Any
 import torch.fx as fx
 
 from ..analysis.memory_analyzer import MemoryAnalyzer, MemoryConstraint, AnalysisResult
+from ..analysis.spill_scheduler import SpillScheduler, SpillStrategy, MemoryEventType
 
 
 class MemoryVisualizer:
@@ -108,6 +109,74 @@ class MemoryVisualizer:
             "nodes": nodes,
             "strategies": strategies_data,
             "dynamic_shapes": self.dynamic_shapes,
+            "spill_schedules": self._build_spill_schedules(),
+        }
+
+    def _build_spill_schedules(self) -> Dict[str, Any]:
+        """Build spill schedule data for different memory limits"""
+        # Get baseline peak memory
+        baseline = self.results.get("greedy", list(self.results.values())[0])
+        peak_memory = baseline.peak_min_memory
+
+        # Generate schedules for different memory limits
+        schedules = {}
+        memory_limits = [0.25, 0.5, 0.75, 1.0]  # Fractions of peak
+
+        for fraction in memory_limits:
+            limit_bytes = int(peak_memory * fraction)
+            limit_label = f"{int(fraction * 100)}%"
+
+            try:
+                scheduler = SpillScheduler(
+                    self.gm,
+                    memory_limit_bytes=limit_bytes,
+                    spill_strategy=SpillStrategy.COST_BENEFIT,
+                )
+                result = scheduler.schedule()
+
+                # Build events timeline
+                events = []
+                for e in result.events:
+                    if e.event_type in [MemoryEventType.SPILL, MemoryEventType.RELOAD]:
+                        events.append({
+                            "step": e.step,
+                            "type": e.event_type.value,
+                            "tensor": e.tensor_name,
+                            "size_kb": e.size_bytes / 1024,
+                            "node": e.node_name,
+                            "fast_kb": e.fast_memory_used / 1024,
+                            "slow_kb": e.slow_memory_used / 1024,
+                        })
+
+                schedules[limit_label] = {
+                    "limit_kb": limit_bytes / 1024,
+                    "total_spills": result.total_spills,
+                    "total_reloads": result.total_reloads,
+                    "spill_bytes_kb": result.total_spill_bytes / 1024,
+                    "peak_fast_kb": result.peak_fast_memory / 1024,
+                    "peak_slow_kb": result.peak_slow_memory / 1024,
+                    "spill_trigger_nodes": result.spill_trigger_nodes,
+                    "reload_trigger_nodes": result.reload_trigger_nodes,
+                    "events": events,
+                    "fast_timeline": [m / 1024 for m in result.fast_memory_timeline],
+                    "slow_timeline": [m / 1024 for m in result.slow_memory_timeline],
+                    "spill_decisions": [
+                        {
+                            "tensor": d.tensor_name,
+                            "size_kb": d.size_bytes / 1024,
+                            "spill_step": d.spill_step,
+                            "reload_step": d.reload_step,
+                            "duration": d.spill_duration,
+                        }
+                        for d in result.spill_decisions
+                    ],
+                }
+            except Exception:
+                schedules[limit_label] = {"error": True}
+
+        return {
+            "peak_memory_kb": peak_memory / 1024,
+            "schedules": schedules,
         }
 
     def _build_memory_blocks(self, result: AnalysisResult) -> List[Dict]:
@@ -529,6 +598,7 @@ class MemoryVisualizer:
                 <div class="tabs">
                     <div class="tab active" data-tab="memory">Memory Timeline</div>
                     <div class="tab" data-tab="memorymap">Memory Map</div>
+                    <div class="tab" data-tab="spill">Spill Scheduler</div>
                     <div class="tab" data-tab="comparison">Strategy Comparison</div>
                     <div class="tab" data-tab="tensors">Tensor Lifetimes</div>
                 </div>
@@ -567,6 +637,39 @@ class MemoryVisualizer:
                     <div class="step-details" id="block-details">
                         <h4>Memory Block Details</h4>
                         <div id="block-info"></div>
+                    </div>
+                </div>
+
+                <div id="tab-spill" class="tab-content">
+                    <div class="card" style="margin-bottom:16px;">
+                        <div class="card-title">Memory Limit Selection</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;" id="spill-limit-buttons"></div>
+                    </div>
+
+                    <div class="chart-container">
+                        <div class="chart-title">Fast/Slow Memory Usage Over Time</div>
+                        <div id="spill-chart" style="height:350px;"></div>
+                        <div class="legend">
+                            <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>Fast Memory</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Slow Memory (Spilled)</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#f59e0b;opacity:0.5"></div>Memory Limit</div>
+                        </div>
+                    </div>
+
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px;">
+                        <div class="card">
+                            <div class="card-title">Spill Summary</div>
+                            <div id="spill-summary"></div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">Trigger Nodes</div>
+                            <div id="trigger-nodes"></div>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-top:16px;">
+                        <div class="card-title">Spill/Reload Events</div>
+                        <div class="tensor-list" id="spill-events" style="max-height:300px;"></div>
                     </div>
                 </div>
 
@@ -611,12 +714,15 @@ class MemoryVisualizer:
         const data = {data_json};
         let currentStrategy = 'greedy';
 
+        let currentSpillLimit = '50%';
+
         // Initialize
         function init() {{
             renderStrategyButtons();
             renderSummary();
             renderMemoryChart();
             renderMemoryMap();
+            renderSpillScheduler();
             renderComparisonChart();
             renderComparisonTable();
             renderLifetimeChart();
@@ -637,6 +743,8 @@ class MemoryVisualizer:
                         renderLifetimeChart();
                     }} else if (tab.dataset.tab === 'memorymap') {{
                         renderMemoryMap();
+                    }} else if (tab.dataset.tab === 'spill') {{
+                        renderSpillScheduler();
                     }}
                 }});
             }});
@@ -1153,6 +1261,230 @@ class MemoryVisualizer:
                             Size: ${{t.size_mb.toFixed(4)}} MB |
                             Lifetime: ${{t.birth}} - ${{t.death}}
                             ${{t.reused_from ? '| Reused from: ' + t.reused_from : ''}}
+                        </div>
+                    </div>
+                `;
+            }}).join('');
+        }}
+
+        function renderSpillScheduler() {{
+            const spillData = data.spill_schedules;
+            if (!spillData || !spillData.schedules) return;
+
+            // Render limit buttons
+            const btnContainer = document.getElementById('spill-limit-buttons');
+            const limits = Object.keys(spillData.schedules);
+            btnContainer.innerHTML = limits.map(limit => `
+                <button class="strategy-btn ${{limit === currentSpillLimit ? 'active' : ''}}"
+                        onclick="selectSpillLimit('${{limit}}')"
+                        style="padding:8px 16px;">
+                    <div class="name">${{limit}} of Peak</div>
+                    <div class="stats">${{spillData.schedules[limit].limit_kb?.toFixed(1) || '?'}} KB</div>
+                </button>
+            `).join('');
+
+            renderSpillChart();
+            renderSpillSummary();
+            renderSpillEvents();
+        }}
+
+        function selectSpillLimit(limit) {{
+            currentSpillLimit = limit;
+            renderSpillScheduler();
+        }}
+
+        function renderSpillChart() {{
+            const spillData = data.spill_schedules;
+            const schedule = spillData.schedules[currentSpillLimit];
+            if (!schedule || schedule.error) {{
+                document.getElementById('spill-chart').innerHTML =
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;">No spill data available</div>';
+                return;
+            }}
+
+            const fast = schedule.fast_timeline || [];
+            const slow = schedule.slow_timeline || [];
+            const limit = schedule.limit_kb;
+            const x = fast.map((_, i) => i);
+
+            const traces = [
+                {{
+                    x: x,
+                    y: fast,
+                    name: 'Fast Memory',
+                    type: 'scatter',
+                    fill: 'tozeroy',
+                    fillcolor: 'rgba(16,185,129,0.2)',
+                    line: {{ color: '#10b981', width: 2 }},
+                }},
+                {{
+                    x: x,
+                    y: slow,
+                    name: 'Slow Memory (Spilled)',
+                    type: 'scatter',
+                    fill: 'tozeroy',
+                    fillcolor: 'rgba(239,68,68,0.2)',
+                    line: {{ color: '#ef4444', width: 2 }},
+                }},
+                {{
+                    x: [0, x.length - 1],
+                    y: [limit, limit],
+                    name: 'Memory Limit',
+                    type: 'scatter',
+                    mode: 'lines',
+                    line: {{ color: '#f59e0b', width: 2, dash: 'dash' }},
+                }},
+            ];
+
+            // Add markers for spill/reload events
+            const events = schedule.events || [];
+            const spillEvents = events.filter(e => e.type === 'spill');
+            const reloadEvents = events.filter(e => e.type === 'reload');
+
+            if (spillEvents.length > 0) {{
+                traces.push({{
+                    x: spillEvents.map(e => e.step),
+                    y: spillEvents.map(e => e.fast_kb),
+                    name: 'Spill',
+                    mode: 'markers',
+                    marker: {{ color: '#ef4444', size: 10, symbol: 'triangle-down' }},
+                    text: spillEvents.map(e => `Spill: ${{e.tensor}} (${{e.size_kb.toFixed(1)}}KB)`),
+                    hoverinfo: 'text',
+                }});
+            }}
+
+            if (reloadEvents.length > 0) {{
+                traces.push({{
+                    x: reloadEvents.map(e => e.step),
+                    y: reloadEvents.map(e => e.fast_kb),
+                    name: 'Reload',
+                    mode: 'markers',
+                    marker: {{ color: '#3b82f6', size: 10, symbol: 'triangle-up' }},
+                    text: reloadEvents.map(e => `Reload: ${{e.tensor}} (${{e.size_kb.toFixed(1)}}KB)`),
+                    hoverinfo: 'text',
+                }});
+            }}
+
+            const layout = {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                margin: {{ t: 20, r: 20, b: 50, l: 60 }},
+                xaxis: {{
+                    title: 'Execution Step',
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.05)',
+                }},
+                yaxis: {{
+                    title: 'Memory (KB)',
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.05)',
+                }},
+                legend: {{
+                    orientation: 'h',
+                    y: -0.15,
+                    font: {{ color: '#94a3b8' }},
+                }},
+                hovermode: 'closest',
+            }};
+
+            Plotly.newPlot('spill-chart', traces, layout, {{
+                responsive: true,
+                displayModeBar: false,
+            }});
+        }}
+
+        function renderSpillSummary() {{
+            const spillData = data.spill_schedules;
+            const schedule = spillData.schedules[currentSpillLimit];
+
+            const summaryContainer = document.getElementById('spill-summary');
+            const triggerContainer = document.getElementById('trigger-nodes');
+
+            if (!schedule || schedule.error) {{
+                summaryContainer.innerHTML = '<div style="color:#94a3b8;">No data</div>';
+                triggerContainer.innerHTML = '<div style="color:#94a3b8;">No data</div>';
+                return;
+            }}
+
+            summaryContainer.innerHTML = `
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#94a3b8;">Memory Limit</span>
+                    <span style="color:#e2e8f0;font-family:monospace;">${{schedule.limit_kb.toFixed(1)}} KB</span>
+                </div>
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#94a3b8;">Total Spills</span>
+                    <span style="color:#ef4444;font-family:monospace;">${{schedule.total_spills}}</span>
+                </div>
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#94a3b8;">Total Reloads</span>
+                    <span style="color:#3b82f6;font-family:monospace;">${{schedule.total_reloads}}</span>
+                </div>
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#94a3b8;">Spill Data Volume</span>
+                    <span style="color:#e2e8f0;font-family:monospace;">${{schedule.spill_bytes_kb.toFixed(1)}} KB</span>
+                </div>
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.1);">
+                    <span style="color:#94a3b8;">Peak Fast Memory</span>
+                    <span style="color:#10b981;font-family:monospace;">${{schedule.peak_fast_kb.toFixed(1)}} KB</span>
+                </div>
+                <div class="info-row" style="display:flex;justify-content:space-between;padding:8px 0;">
+                    <span style="color:#94a3b8;">Peak Slow Memory</span>
+                    <span style="color:#ef4444;font-family:monospace;">${{schedule.peak_slow_kb.toFixed(1)}} KB</span>
+                </div>
+            `;
+
+            const spillNodes = schedule.spill_trigger_nodes || [];
+            const reloadNodes = schedule.reload_trigger_nodes || [];
+
+            triggerContainer.innerHTML = `
+                <div style="margin-bottom:12px;">
+                    <div style="color:#ef4444;font-size:12px;font-weight:600;margin-bottom:6px;">SPILL Triggers (${{spillNodes.length}})</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                        ${{spillNodes.map(n => `<span style="background:rgba(239,68,68,0.2);color:#ef4444;padding:2px 8px;border-radius:4px;font-size:11px;">${{n}}</span>`).join('')}}
+                        ${{spillNodes.length === 0 ? '<span style="color:#94a3b8;font-size:12px;">None</span>' : ''}}
+                    </div>
+                </div>
+                <div>
+                    <div style="color:#3b82f6;font-size:12px;font-weight:600;margin-bottom:6px;">RELOAD Triggers (${{reloadNodes.length}})</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                        ${{reloadNodes.map(n => `<span style="background:rgba(59,130,246,0.2);color:#3b82f6;padding:2px 8px;border-radius:4px;font-size:11px;">${{n}}</span>`).join('')}}
+                        ${{reloadNodes.length === 0 ? '<span style="color:#94a3b8;font-size:12px;">None</span>' : ''}}
+                    </div>
+                </div>
+            `;
+        }}
+
+        function renderSpillEvents() {{
+            const spillData = data.spill_schedules;
+            const schedule = spillData.schedules[currentSpillLimit];
+            const container = document.getElementById('spill-events');
+
+            if (!schedule || schedule.error || !schedule.events) {{
+                container.innerHTML = '<div style="color:#94a3b8;padding:12px;">No events</div>';
+                return;
+            }}
+
+            const events = schedule.events;
+            if (events.length === 0) {{
+                container.innerHTML = '<div style="color:#94a3b8;padding:12px;">No spill/reload events needed</div>';
+                return;
+            }}
+
+            container.innerHTML = events.map(e => {{
+                const isSpill = e.type === 'spill';
+                const color = isSpill ? '#ef4444' : '#3b82f6';
+                const icon = isSpill ? '↓' : '↑';
+                return `
+                    <div class="tensor-item" style="border-left:3px solid ${{color}};">
+                        <div style="display:flex;justify-content:space-between;align-items:center;">
+                            <div>
+                                <span style="color:${{color}};font-weight:600;">${{icon}} ${{e.type.toUpperCase()}}</span>
+                                <span style="color:#e2e8f0;margin-left:8px;">${{e.tensor}}</span>
+                            </div>
+                            <span style="color:#94a3b8;font-size:11px;">Step ${{e.step}}</span>
+                        </div>
+                        <div style="color:#94a3b8;font-size:11px;margin-top:4px;">
+                            Size: ${{e.size_kb.toFixed(1)}} KB | Node: ${{e.node}} | Fast: ${{e.fast_kb.toFixed(1)}}KB, Slow: ${{e.slow_kb.toFixed(1)}}KB
                         </div>
                     </div>
                 `;
