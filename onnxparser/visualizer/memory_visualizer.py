@@ -76,6 +76,7 @@ class MemoryVisualizer:
                     "name": name,
                     "shape": tensor.shape,
                     "dtype": str(tensor.dtype),
+                    "size_bytes": tensor.size_bytes,
                     "size_mb": tensor.size_bytes / 1e6,
                     "birth": tensor.birth_step,
                     "death": tensor.death_step,
@@ -84,11 +85,16 @@ class MemoryVisualizer:
                     "is_output": tensor.is_output,
                     "reused_from": tensor.reused_from,
                     "is_inplace": tensor.is_inplace,
+                    "memory_offset": tensor.memory_offset,
                 })
+
+            # Build memory blocks timeline for memory map visualization
+            memory_blocks = self._build_memory_blocks(result)
 
             strategies_data[strategy_name] = {
                 "steps": steps_data,
                 "tensors": tensors_data,
+                "memory_blocks": memory_blocks,
                 "summary": {
                     "peak_max_mb": result.peak_max_memory / 1e6,
                     "peak_min_mb": result.peak_min_memory / 1e6,
@@ -103,6 +109,51 @@ class MemoryVisualizer:
             "strategies": strategies_data,
             "dynamic_shapes": self.dynamic_shapes,
         }
+
+    def _build_memory_blocks(self, result: AnalysisResult) -> List[Dict]:
+        """Build memory block timeline for visualization"""
+        blocks = []
+
+        # Filter non-weight tensors with valid memory offsets
+        tensors = [
+            t for t in result.tensors.values()
+            if not t.is_weight and t.memory_offset >= 0
+        ]
+
+        # Sort by memory offset for consistent visualization
+        tensors.sort(key=lambda t: (t.memory_offset, t.birth_step))
+
+        # Assign colors based on tensor type
+        color_idx = 0
+        colors = [
+            '#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6',
+            '#ec4899', '#06b6d4', '#84cc16', '#f97316', '#6366f1',
+            '#14b8a6', '#a855f7', '#eab308', '#22c55e', '#0ea5e9',
+        ]
+
+        for tensor in tensors:
+            # Calculate end offset
+            end_offset = tensor.memory_offset + tensor.size_bytes
+
+            block = {
+                "name": tensor.name,
+                "offset": tensor.memory_offset,
+                "size": tensor.size_bytes,
+                "end_offset": end_offset,
+                "birth": tensor.birth_step,
+                "death": tensor.death_step,
+                "is_input": tensor.is_input,
+                "is_output": tensor.is_output,
+                "reused_from": tensor.reused_from,
+                "is_inplace": tensor.is_inplace,
+                "color": colors[color_idx % len(colors)],
+                "shape": tensor.shape,
+                "dtype": str(tensor.dtype),
+            }
+            blocks.append(block)
+            color_idx += 1
+
+        return blocks
 
     def to_html(self) -> str:
         """Generate interactive HTML visualization"""
@@ -477,6 +528,7 @@ class MemoryVisualizer:
             <div class="content">
                 <div class="tabs">
                     <div class="tab active" data-tab="memory">Memory Timeline</div>
+                    <div class="tab" data-tab="memorymap">Memory Map</div>
                     <div class="tab" data-tab="comparison">Strategy Comparison</div>
                     <div class="tab" data-tab="tensors">Tensor Lifetimes</div>
                 </div>
@@ -495,6 +547,26 @@ class MemoryVisualizer:
                     <div class="step-details" id="step-details">
                         <h4>Step Details</h4>
                         <div id="step-info"></div>
+                    </div>
+                </div>
+
+                <div id="tab-memorymap" class="tab-content">
+                    <div class="chart-container">
+                        <div class="chart-title">Memory Block Allocation Map</div>
+                        <div id="memorymap-chart" style="height:500px;"></div>
+                        <div class="legend">
+                            <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>Input</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>Allocated</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6"></div>Reused</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>Output</div>
+                        </div>
+                        <div style="color:#94a3b8;font-size:12px;margin-top:8px;">
+                            X-axis: Execution Step | Y-axis: Memory Address Space (bytes) | Click on a block for details
+                        </div>
+                    </div>
+                    <div class="step-details" id="block-details">
+                        <h4>Memory Block Details</h4>
+                        <div id="block-info"></div>
                     </div>
                 </div>
 
@@ -544,6 +616,7 @@ class MemoryVisualizer:
             renderStrategyButtons();
             renderSummary();
             renderMemoryChart();
+            renderMemoryMap();
             renderComparisonChart();
             renderComparisonTable();
             renderLifetimeChart();
@@ -562,6 +635,8 @@ class MemoryVisualizer:
                         renderComparisonChart();
                     }} else if (tab.dataset.tab === 'tensors') {{
                         renderLifetimeChart();
+                    }} else if (tab.dataset.tab === 'memorymap') {{
+                        renderMemoryMap();
                     }}
                 }});
             }});
@@ -758,6 +833,174 @@ class MemoryVisualizer:
                     <span class="info-label">Reused From</span>
                     <span class="info-value">${{step.reused_from || 'None'}}</span>
                 </div>
+            `;
+        }}
+
+        function renderMemoryMap() {{
+            const strategyData = data.strategies[currentStrategy];
+            const blocks = strategyData.memory_blocks || [];
+
+            if (blocks.length === 0) {{
+                document.getElementById('memorymap-chart').innerHTML =
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;">No memory blocks to display</div>';
+                return;
+            }}
+
+            // Create shapes for memory blocks
+            const shapes = [];
+            const annotations = [];
+
+            // Find max values for scaling
+            const maxStep = Math.max(...blocks.map(b => b.death)) + 1;
+            const maxOffset = Math.max(...blocks.map(b => b.end_offset));
+
+            // Create a shape for each memory block
+            blocks.forEach((block, idx) => {{
+                // Determine color based on block type
+                let color;
+                if (block.is_input) {{
+                    color = 'rgba(16, 185, 129, 0.7)';  // green
+                }} else if (block.is_output) {{
+                    color = 'rgba(245, 158, 11, 0.7)';  // amber
+                }} else if (block.reused_from) {{
+                    color = 'rgba(139, 92, 246, 0.7)';  // purple
+                }} else {{
+                    color = 'rgba(59, 130, 246, 0.7)';  // blue
+                }}
+
+                shapes.push({{
+                    type: 'rect',
+                    x0: block.birth,
+                    x1: block.death + 1,
+                    y0: block.offset,
+                    y1: block.end_offset,
+                    fillcolor: color,
+                    line: {{
+                        color: color.replace('0.7', '1'),
+                        width: 1,
+                    }},
+                    name: block.name,
+                }});
+
+                // Add label if block is large enough
+                const blockHeight = block.end_offset - block.offset;
+                const blockWidth = block.death - block.birth + 1;
+                if (blockHeight > maxOffset * 0.05 && blockWidth > 1) {{
+                    annotations.push({{
+                        x: (block.birth + block.death + 1) / 2,
+                        y: (block.offset + block.end_offset) / 2,
+                        text: block.name.length > 15 ? block.name.slice(0, 13) + '..' : block.name,
+                        showarrow: false,
+                        font: {{ color: 'white', size: 10 }},
+                    }});
+                }}
+            }});
+
+            // Create invisible scatter trace for hover info
+            const hoverTrace = {{
+                x: blocks.map(b => (b.birth + b.death + 1) / 2),
+                y: blocks.map(b => (b.offset + b.end_offset) / 2),
+                mode: 'markers',
+                marker: {{ size: 1, opacity: 0 }},
+                text: blocks.map(b => `<b>${{b.name}}</b><br>` +
+                    `Shape: ${{JSON.stringify(b.shape)}}<br>` +
+                    `Size: ${{(b.size / 1024).toFixed(2)}} KB<br>` +
+                    `Offset: ${{b.offset}} - ${{b.end_offset}}<br>` +
+                    `Lifetime: Step ${{b.birth}} - ${{b.death}}<br>` +
+                    (b.reused_from ? `Reused from: ${{b.reused_from}}` : 'New allocation')),
+                hoverinfo: 'text',
+                hoverlabel: {{
+                    bgcolor: 'rgba(22, 33, 62, 0.95)',
+                    bordercolor: '#f59e0b',
+                    font: {{ color: '#e2e8f0' }},
+                }},
+                customdata: blocks,
+            }};
+
+            const layout = {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'rgba(0,0,0,0.2)',
+                margin: {{ t: 30, r: 30, b: 60, l: 80 }},
+                shapes: shapes,
+                annotations: annotations,
+                xaxis: {{
+                    title: 'Execution Step',
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    range: [-0.5, maxStep + 0.5],
+                    dtick: Math.ceil(maxStep / 20),
+                }},
+                yaxis: {{
+                    title: 'Memory Address (bytes)',
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                    range: [0, maxOffset * 1.05],
+                    tickformat: '.2s',
+                }},
+                hovermode: 'closest',
+            }};
+
+            Plotly.newPlot('memorymap-chart', [hoverTrace], layout, {{
+                responsive: true,
+                displayModeBar: false,
+            }});
+
+            // Click handler for block details
+            document.getElementById('memorymap-chart').on('plotly_click', function(eventData) {{
+                if (eventData.points[0].customdata) {{
+                    showBlockDetails(eventData.points[0].customdata);
+                }}
+            }});
+        }}
+
+        function showBlockDetails(block) {{
+            const container = document.getElementById('block-details');
+            container.classList.add('visible');
+
+            document.getElementById('block-info').innerHTML = `
+                <div class="info-row">
+                    <span class="info-label">Name</span>
+                    <span class="info-value">${{block.name}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Shape</span>
+                    <span class="info-value">${{JSON.stringify(block.shape)}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Data Type</span>
+                    <span class="info-value">${{block.dtype}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Size</span>
+                    <span class="info-value">${{(block.size / 1024).toFixed(2)}} KB (${{block.size}} bytes)</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Memory Offset</span>
+                    <span class="info-value">${{block.offset}} - ${{block.end_offset}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Lifetime</span>
+                    <span class="info-value">Step ${{block.birth}} → Step ${{block.death}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Duration</span>
+                    <span class="info-value">${{block.death - block.birth + 1}} steps</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Type</span>
+                    <span class="info-value">${{
+                        block.is_input ? 'Input' :
+                        block.is_output ? 'Output' :
+                        block.reused_from ? 'Reused from ' + block.reused_from :
+                        'Allocated'
+                    }}</span>
+                </div>
+                ${{block.is_inplace ? `
+                <div class="info-row">
+                    <span class="info-label">In-place</span>
+                    <span class="info-value">Yes (overwrites input)</span>
+                </div>
+                ` : ''}}
             `;
         }}
 
