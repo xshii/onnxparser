@@ -2,9 +2,11 @@
 """Memory allocation strategies - all strategies support memory constraints"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Type, Tuple
-import torch
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Type, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .memory_analyzer import TensorInfo, MemoryConstraint
 
 
 class MemoryExceededError(Exception):

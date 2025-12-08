@@ -8,7 +8,7 @@ import webbrowser
 from typing import Dict, Optional, List, Any
 import torch.fx as fx
 
-from ..analysis.memory_analyzer import MemoryAnalyzer, MemoryConstraint, AnalysisResult
+from ..analysis.memory_analyzer import MemoryAnalyzer, AnalysisResult
 from ..analysis.spill_scheduler import SpillScheduler, SpillStrategy, MemoryEventType
 
 
@@ -115,8 +115,6 @@ class MemoryVisualizer:
 
     def _build_static_layout(self) -> Dict[str, Any]:
         """Build static allocation layout data"""
-        from ..analysis.strategies import StaticAllocationStrategy
-
         # Get static strategy result if available
         if "static" not in self.results:
             return {"available": False}

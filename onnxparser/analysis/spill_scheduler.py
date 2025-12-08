@@ -2,11 +2,11 @@
 """Memory spill/reload scheduler for memory-constrained execution"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 from enum import Enum
 import torch.fx as fx
 
-from .memory_analyzer import MemoryAnalyzer, MemoryConstraint, TensorInfo, AnalysisResult
+from .memory_analyzer import MemoryAnalyzer, TensorInfo
 
 
 class MemoryEventType(Enum):
