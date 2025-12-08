@@ -110,6 +110,78 @@ class MemoryVisualizer:
             "strategies": strategies_data,
             "dynamic_shapes": self.dynamic_shapes,
             "spill_schedules": self._build_spill_schedules(),
+            "static_layout": self._build_static_layout(),
+        }
+
+    def _build_static_layout(self) -> Dict[str, Any]:
+        """Build static allocation layout data"""
+        from ..analysis.strategies import StaticAllocationStrategy
+
+        # Get static strategy result if available
+        if "static" not in self.results:
+            return {"available": False}
+
+        result = self.results["static"]
+
+        # Build layout data
+        layout_data = []
+        for name, tensor in result.tensors.items():
+            if tensor.is_weight:
+                continue
+            layout_data.append({
+                "name": name,
+                "offset": tensor.memory_offset,
+                "size": tensor.size_bytes,
+                "birth": tensor.birth_step,
+                "death": tensor.death_step,
+                "shape": tensor.shape,
+            })
+
+        # Sort by offset
+        layout_data.sort(key=lambda x: x["offset"])
+
+        # Calculate total memory
+        total_memory = max(
+            (t["offset"] + t["size"]) for t in layout_data
+        ) if layout_data else 0
+
+        # Generate C code
+        c_code_lines = [
+            "// Static Memory Layout",
+            f"// Total Memory Required: {total_memory} bytes",
+            "",
+            f"#define MEMORY_POOL_SIZE {total_memory}",
+            "",
+            "// Tensor Offsets",
+        ]
+        for t in layout_data:
+            safe_name = t["name"].upper().replace(".", "_").replace("-", "_")
+            c_code_lines.append(
+                f"#define OFFSET_{safe_name} {t['offset']}  // size: {t['size']}"
+            )
+
+        # Find memory reuse info
+        offset_groups = {}
+        for t in layout_data:
+            off = t["offset"]
+            if off not in offset_groups:
+                offset_groups[off] = []
+            offset_groups[off].append(t["name"])
+
+        reuse_info = [
+            {"offset": off, "tensors": names}
+            for off, names in offset_groups.items()
+            if len(names) > 1
+        ]
+
+        return {
+            "available": True,
+            "layout": layout_data,
+            "total_memory": total_memory,
+            "total_memory_kb": total_memory / 1024,
+            "c_code": "\n".join(c_code_lines),
+            "reuse_info": reuse_info,
+            "tensor_count": len(layout_data),
         }
 
     def _build_spill_schedules(self) -> Dict[str, Any]:
@@ -614,6 +686,7 @@ class MemoryVisualizer:
                 <div class="tabs">
                     <div class="tab active" data-tab="memory">Memory Timeline</div>
                     <div class="tab" data-tab="memorymap">Memory Map</div>
+                    <div class="tab" data-tab="static">Static Layout</div>
                     <div class="tab" data-tab="spill">Spill Scheduler</div>
                     <div class="tab" data-tab="comparison">Strategy Comparison</div>
                     <div class="tab" data-tab="tensors">Tensor Lifetimes</div>
@@ -653,6 +726,53 @@ class MemoryVisualizer:
                     <div class="step-details" id="block-details">
                         <h4>Memory Block Details</h4>
                         <div id="block-info"></div>
+                    </div>
+                </div>
+
+                <div id="tab-static" class="tab-content">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+                        <div class="card">
+                            <div class="card-title">Static Allocation Summary</div>
+                            <div id="static-summary"></div>
+                        </div>
+                        <div class="card">
+                            <div class="card-title">Memory Reuse</div>
+                            <div id="static-reuse"></div>
+                        </div>
+                    </div>
+
+                    <div class="chart-container">
+                        <div class="chart-title">Fixed Memory Address Layout</div>
+                        <div id="static-layout-chart" style="height:400px;"></div>
+                        <div class="legend">
+                            <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>Memory Block</div>
+                            <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>Reused Address</div>
+                        </div>
+                    </div>
+
+                    <div class="card" style="margin-top:16px;">
+                        <div class="card-title">Generated C Code</div>
+                        <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+                            <button class="btn" onclick="copyStaticCode()" style="padding:6px 12px;font-size:12px;">Copy Code</button>
+                        </div>
+                        <pre id="static-c-code" style="background:rgba(0,0,0,0.4);padding:16px;border-radius:8px;overflow-x:auto;font-family:monospace;font-size:13px;line-height:1.5;color:#a5d6ff;max-height:300px;overflow-y:auto;"></pre>
+                    </div>
+
+                    <div class="card" style="margin-top:16px;">
+                        <div class="card-title">Address Table</div>
+                        <table id="static-table">
+                            <thead>
+                                <tr>
+                                    <th>Tensor</th>
+                                    <th>Offset (hex)</th>
+                                    <th>Offset (dec)</th>
+                                    <th>Size</th>
+                                    <th>Lifetime</th>
+                                    <th>Shape</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
                     </div>
                 </div>
 
@@ -745,6 +865,7 @@ class MemoryVisualizer:
             renderSummary();
             renderMemoryChart();
             renderMemoryMap();
+            renderStaticLayout();
             renderSpillScheduler();
             renderComparisonChart();
             renderComparisonTable();
@@ -768,6 +889,8 @@ class MemoryVisualizer:
                         renderMemoryMap();
                     }} else if (tab.dataset.tab === 'spill') {{
                         renderSpillScheduler();
+                    }} else if (tab.dataset.tab === 'static') {{
+                        renderStaticLayout();
                     }}
                 }});
             }});
@@ -1133,6 +1256,110 @@ class MemoryVisualizer:
                 </div>
                 ` : ''}}
             `;
+        }}
+
+        function renderStaticLayout() {{
+            const staticData = data.static_layout;
+            if (!staticData.available) {{
+                document.getElementById('static-summary').innerHTML = '<p style="color:#94a3b8;">Static layout not available</p>';
+                return;
+            }}
+
+            // Summary
+            document.getElementById('static-summary').innerHTML = `
+                <div class="info-row">
+                    <span class="info-label">Total Memory</span>
+                    <span class="info-value">${{staticData.total_memory_kb.toFixed(2)}} KB</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Tensor Count</span>
+                    <span class="info-value">${{staticData.tensor_count}}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Reused Addresses</span>
+                    <span class="info-value">${{staticData.reuse_info.length}}</span>
+                </div>
+            `;
+
+            // Reuse info
+            if (staticData.reuse_info.length > 0) {{
+                document.getElementById('static-reuse').innerHTML = staticData.reuse_info.map(r => `
+                    <div style="margin-bottom:8px;padding:8px;background:rgba(16,185,129,0.1);border-radius:4px;">
+                        <div style="color:#10b981;font-weight:500;">Offset 0x${{r.offset.toString(16).toUpperCase()}}</div>
+                        <div style="color:#94a3b8;font-size:12px;margin-top:4px;">${{r.tensors.join(', ')}}</div>
+                    </div>
+                `).join('');
+            }} else {{
+                document.getElementById('static-reuse').innerHTML = '<p style="color:#94a3b8;">No memory reuse (all lifetimes overlap)</p>';
+            }}
+
+            // C code
+            document.getElementById('static-c-code').textContent = staticData.c_code;
+
+            // Table
+            const tbody = document.querySelector('#static-table tbody');
+            tbody.innerHTML = staticData.layout.map(t => `
+                <tr>
+                    <td>${{t.name}}</td>
+                    <td style="font-family:monospace;color:#a5d6ff;">0x${{t.offset.toString(16).toUpperCase().padStart(8, '0')}}</td>
+                    <td>${{t.offset}}</td>
+                    <td>${{(t.size / 1024).toFixed(2)}} KB</td>
+                    <td>${{t.birth}} - ${{t.death}}</td>
+                    <td style="font-size:12px;">[${{t.shape.join(', ')}}]</td>
+                </tr>
+            `).join('');
+
+            // Chart - Memory blocks as horizontal bars
+            const layout = staticData.layout;
+            if (layout.length === 0) return;
+
+            // Find overlapping groups for coloring
+            const offsetCounts = {{}};
+            layout.forEach(t => {{
+                offsetCounts[t.offset] = (offsetCounts[t.offset] || 0) + 1;
+            }});
+
+            const traces = layout.map((t, idx) => ({{
+                x: [t.size / 1024],
+                y: [t.name],
+                type: 'bar',
+                orientation: 'h',
+                base: [t.offset / 1024],
+                marker: {{
+                    color: offsetCounts[t.offset] > 1 ? 'rgba(16,185,129,0.8)' : 'rgba(59,130,246,0.8)',
+                    line: {{ color: 'rgba(255,255,255,0.3)', width: 1 }}
+                }},
+                hovertemplate: `${{t.name}}<br>Offset: 0x${{t.offset.toString(16).toUpperCase()}}<br>Size: ${{(t.size / 1024).toFixed(2)}} KB<br>Lifetime: ${{t.birth}} - ${{t.death}}<extra></extra>`,
+                showlegend: false,
+            }}));
+
+            const chartLayout = {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                margin: {{ t: 20, r: 20, b: 50, l: 150 }},
+                barmode: 'overlay',
+                xaxis: {{
+                    title: 'Memory Address (KB)',
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.1)',
+                }},
+                yaxis: {{
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.05)',
+                }},
+            }};
+
+            Plotly.newPlot('static-layout-chart', traces, chartLayout, {{
+                responsive: true,
+                displayModeBar: false,
+            }});
+        }}
+
+        function copyStaticCode() {{
+            const code = document.getElementById('static-c-code').textContent;
+            navigator.clipboard.writeText(code).then(() => {{
+                alert('Code copied to clipboard!');
+            }});
         }}
 
         function renderComparisonChart() {{
