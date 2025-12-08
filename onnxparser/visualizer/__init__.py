@@ -7,6 +7,10 @@ from .memory_visualizer import (
     visualize_memory,
     serve_memory,
 )
+from .server import VisualizerServer, serve_dynamic
+from .manager import ModelManager, get_manager
+from .extractor import GraphExtractor
+from .layout import GraphLayoutEngine
 
 __all__ = [
     "GraphVisualizer",
@@ -15,4 +19,10 @@ __all__ = [
     "MemoryVisualizer",
     "visualize_memory",
     "serve_memory",
+    "VisualizerServer",
+    "ModelManager",
+    "serve_dynamic",
+    "get_manager",
+    "GraphExtractor",
+    "GraphLayoutEngine",
 ]

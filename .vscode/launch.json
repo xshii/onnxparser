@@ -2,6 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "[Default] Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "python": "${workspaceFolder}/venv/bin/python"
+    },
+    {
       "name": "[Test] 01. All",
       "type": "debugpy",
       "request": "launch",
@@ -32,6 +39,14 @@
       "type": "debugpy",
       "request": "launch",
       "program": "examples/visualize_graph.py"
+    },
+    {
+      "name": "[Server] Visualizer (port 8080)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "examples/visualize_graph.py",
+      "args": ["--model", "transformer", "--port", "8080"],
+      "python": "${workspaceFolder}/venv/bin/python"
     }
   ]
 }

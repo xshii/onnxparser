@@ -1,17 +1,112 @@
 # -*- coding: utf-8 -*-
-"""Graph visualization with Plotly for beautiful data visualization"""
+"""Graph visualization with integrated memory analysis"""
 
 import json
 import http.server
+import os
+import signal
+import socket
 import socketserver
+import subprocess
+import sys
 import webbrowser
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 import torch
 import torch.fx as fx
 
 
+# Marker to identify our visualizer server process
+_VISUALIZER_MARKER = "ONNXPARSER_VISUALIZER_SERVER"
+
+
+def _is_port_in_use(port: int) -> bool:
+    """Check if a port is currently in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("localhost", port)) == 0
+
+
+def _kill_existing_visualizer(port: int) -> bool:
+    """Kill existing visualizer process on the given port."""
+    if sys.platform == "darwin" or sys.platform.startswith("linux"):
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f":{port}"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return False
+
+            pids = result.stdout.strip().split("\n")
+            killed = False
+
+            for pid in pids:
+                pid = pid.strip()
+                if not pid:
+                    continue
+
+                try:
+                    is_visualizer = False
+
+                    if sys.platform == "darwin":
+                        ps_result = subprocess.run(
+                            ["ps", "-p", pid, "-o", "command="],
+                            capture_output=True,
+                            text=True
+                        )
+                        cmdline = ps_result.stdout
+                        is_visualizer = "python" in cmdline.lower() and (
+                            "visualize_graph" in cmdline or
+                            "graph_visualizer" in cmdline or
+                            "onnxparser" in cmdline
+                        )
+                    else:
+                        with open(f"/proc/{pid}/cmdline", "r") as f:
+                            cmdline = f.read()
+                            is_visualizer = "visualize_graph" in cmdline or "graph_visualizer" in cmdline
+
+                    if is_visualizer:
+                        os.kill(int(pid), signal.SIGTERM)
+                        killed = True
+                        print(f"Killed visualizer process (PID: {pid})")
+
+                except (ProcessLookupError, PermissionError, FileNotFoundError):
+                    continue
+
+            return killed
+
+        except FileNotFoundError:
+            return False
+
+    elif sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True
+            )
+            for line in result.stdout.split("\n"):
+                if f":{port}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        pid = parts[-1]
+                        tasklist = subprocess.run(
+                            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV"],
+                            capture_output=True,
+                            text=True
+                        )
+                        if "python" in tasklist.stdout.lower():
+                            subprocess.run(["taskkill", "/F", "/PID", pid])
+                            print(f"Killed visualizer process (PID: {pid})")
+                            return True
+        except FileNotFoundError:
+            return False
+
+    return False
+
+
 class GraphVisualizer:
-    """Visualize FX GraphModule with Plotly"""
+    """Visualize FX GraphModule with integrated memory analysis"""
 
     def __init__(self, gm: fx.GraphModule, input_data: Optional[Dict[str, torch.Tensor]] = None):
         self.gm = gm
@@ -22,6 +117,7 @@ class GraphVisualizer:
             self._trace_execution()
 
         self.graph_data = self._extract_graph_data()
+        self.memory_data = self._analyze_memory()
 
     def _trace_execution(self):
         """Trace execution to capture intermediate values"""
@@ -72,20 +168,17 @@ class GraphVisualizer:
                 trace_info["mean"] = float(value.mean().item())
                 trace_info["std"] = float(value.std().item()) if value.numel() > 1 else 0.0
 
-                # Histogram data
                 flat = value.flatten().detach().cpu().numpy()
                 trace_info["histogram"] = flat[:min(10000, len(flat))].tolist()
 
-                # Heatmap data (2D slice)
                 if value.dim() >= 2:
                     if value.dim() == 2:
                         hm = value
                     elif value.dim() == 3:
-                        hm = value[0]  # First batch/channel
+                        hm = value[0]
                     else:
                         hm = value.reshape(-1, value.shape[-1])
 
-                    # Limit size for performance
                     h, w = hm.shape
                     if h > 64:
                         hm = hm[::h // 64]
@@ -93,7 +186,6 @@ class GraphVisualizer:
                         hm = hm[:, ::w // 64]
                     trace_info["heatmap"] = hm.detach().cpu().numpy().tolist()
 
-                # Full data for dimension browser (store complete tensor)
                 trace_info["full_data"] = value.detach().cpu().numpy().tolist()
 
             self.execution_trace.append(trace_info)
@@ -114,6 +206,7 @@ class GraphVisualizer:
                 "name": node.name,
                 "op": node.op,
                 "target": str(node.target) if node.target else "",
+                "step": idx,
             }
 
             if node.name in trace_lookup:
@@ -122,7 +215,6 @@ class GraphVisualizer:
                     if key in trace:
                         node_info[key] = trace[key]
 
-            # Node type
             if node.op == "placeholder":
                 node_info["type"] = "input"
             elif node.op == "output":
@@ -166,9 +258,77 @@ class GraphVisualizer:
 
         return {"nodes": nodes, "edges": edges, "has_data": len(self.execution_trace) > 0}
 
+    def _analyze_memory(self) -> Dict[str, Any]:
+        """Run memory analysis with multiple strategies"""
+        try:
+            from ..analysis.memory_analyzer import MemoryAnalyzer
+            from ..analysis.strategies import StrategyRegistry
+
+            strategies_data = {}
+            available_strategies = StrategyRegistry.list_strategies()
+
+            for strategy in available_strategies:
+                try:
+                    analyzer = MemoryAnalyzer(self.gm, strategy=strategy)
+                    result = analyzer.analyze()
+
+                    # Build tensor lifetime data
+                    tensors = []
+                    for name, tensor in result.tensors.items():
+                        if tensor.is_weight:
+                            continue
+                        tensors.append({
+                            "name": name,
+                            "shape": tensor.shape,
+                            "dtype": str(tensor.dtype),
+                            "size_bytes": tensor.size_bytes,
+                            "size_kb": tensor.size_bytes / 1024,
+                            "birth": tensor.birth_step,
+                            "death": tensor.death_step,
+                            "is_input": tensor.is_input,
+                            "is_output": tensor.is_output,
+                            "reused_from": tensor.reused_from,
+                            "memory_offset": tensor.memory_offset,
+                        })
+
+                    # Build memory timeline
+                    timeline = []
+                    for step in result.steps:
+                        timeline.append({
+                            "step": step.step,
+                            "node": step.node_name,
+                            "max_memory": step.max_memory,
+                            "min_memory": step.min_memory,
+                            "live_tensors": step.live_tensors,
+                        })
+
+                    strategies_data[strategy] = {
+                        "tensors": tensors,
+                        "timeline": timeline,
+                        "summary": {
+                            "peak_max_kb": result.peak_max_memory / 1024,
+                            "peak_min_kb": result.peak_min_memory / 1024,
+                            "savings_pct": result.savings_ratio * 100,
+                        }
+                    }
+                except Exception as e:
+                    strategies_data[strategy] = {"error": str(e)}
+
+            return {
+                "available": True,
+                "strategies": strategies_data,
+                "default_strategy": "greedy" if "greedy" in strategies_data else available_strategies[0] if available_strategies else None,
+            }
+
+        except ImportError:
+            return {"available": False, "error": "Memory analyzer not available"}
+        except Exception as e:
+            return {"available": False, "error": str(e)}
+
     def to_html(self) -> str:
-        """Generate HTML with Plotly visualization"""
+        """Generate HTML with integrated visualization"""
         graph_json = json.dumps(self.graph_data)
+        memory_json = json.dumps(self.memory_data)
 
         html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -189,26 +349,79 @@ class GraphVisualizer:
         }}
         #app {{
             display: grid;
-            grid-template-columns: 1fr 400px;
-            grid-template-rows: 56px 1fr;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 48px 1fr 1fr;
+            grid-template-areas:
+                "header header"
+                "graph sidebar"
+                "memory .";
             height: 100vh;
+            transition: all 0.3s ease;
         }}
+        #app.focus-graph {{
+            grid-template-areas:
+                "header header"
+                "graph graph"
+                "graph graph";
+        }}
+        #app.focus-graph #sidebar,
+        #app.focus-graph #memory-panel {{ display: none; }}
+        #app.focus-sidebar {{
+            grid-template-areas:
+                "header header"
+                "sidebar sidebar"
+                "sidebar sidebar";
+        }}
+        #app.focus-sidebar #graph-container,
+        #app.focus-sidebar #memory-panel {{ display: none; }}
+        #app.focus-memory {{
+            grid-template-areas:
+                "header header"
+                "memory memory"
+                "memory memory";
+        }}
+        #app.focus-memory #graph-container,
+        #app.focus-memory #sidebar {{ display: none; }}
         header {{
-            grid-column: 1 / -1;
+            grid-area: header;
             background: rgba(22, 33, 62, 0.95);
             backdrop-filter: blur(10px);
             display: flex;
             align-items: center;
-            padding: 0 24px;
+            padding: 0 20px;
             border-bottom: 1px solid rgba(255,255,255,0.1);
-            gap: 24px;
+            gap: 20px;
         }}
         header h1 {{
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 600;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+        }}
+        .nav-tabs {{
+            display: flex;
+            gap: 4px;
+            margin-left: 20px;
+        }}
+        .nav-tab {{
+            padding: 6px 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }}
+        .nav-tab:hover {{
+            background: rgba(255,255,255,0.1);
+            color: #e2e8f0;
+        }}
+        .nav-tab.active {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-color: transparent;
+            color: white;
         }}
         .controls {{
             display: flex;
@@ -216,13 +429,13 @@ class GraphVisualizer:
             margin-left: auto;
         }}
         .btn {{
-            padding: 8px 16px;
+            padding: 6px 14px;
             background: rgba(255,255,255,0.1);
             border: 1px solid rgba(255,255,255,0.2);
-            border-radius: 8px;
+            border-radius: 6px;
             color: #e2e8f0;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 500;
             transition: all 0.2s;
         }}
@@ -232,14 +445,17 @@ class GraphVisualizer:
             border-color: transparent;
         }}
         #graph-container {{
+            grid-area: graph;
             position: relative;
             overflow: hidden;
+            background: rgba(0,0,0,0.2);
         }}
         #graph-svg {{
             width: 100%;
             height: 100%;
         }}
         #sidebar {{
+            grid-area: sidebar;
             background: rgba(22, 33, 62, 0.95);
             backdrop-filter: blur(10px);
             border-left: 1px solid rgba(255,255,255,0.1);
@@ -248,226 +464,229 @@ class GraphVisualizer:
             overflow: hidden;
         }}
         .sidebar-header {{
-            padding: 16px 20px;
+            padding: 12px 16px;
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }}
         #search {{
             width: 100%;
-            padding: 10px 14px;
+            padding: 8px 12px;
             background: rgba(255,255,255,0.05);
             border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px;
+            border-radius: 6px;
             color: #e2e8f0;
-            font-size: 14px;
+            font-size: 13px;
             outline: none;
-            transition: all 0.2s;
         }}
         #search:focus {{
             border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102,126,234,0.2);
         }}
         .sidebar-content {{
             flex: 1;
             overflow-y: auto;
-            padding: 20px;
+            padding: 16px;
         }}
         .section {{
-            margin-bottom: 24px;
+            margin-bottom: 20px;
         }}
         .section-title {{
-            font-size: 11px;
+            font-size: 10px;
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 1px;
             color: #94a3b8;
-            margin-bottom: 12px;
+            margin-bottom: 10px;
         }}
         .info-grid {{
             display: grid;
-            gap: 8px;
+            gap: 6px;
         }}
         .info-row {{
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 8px 12px;
+            padding: 6px 10px;
             background: rgba(255,255,255,0.03);
-            border-radius: 6px;
+            border-radius: 4px;
+            font-size: 12px;
         }}
-        .info-label {{ color: #94a3b8; font-size: 13px; }}
-        .info-value {{ color: #e2e8f0; font-family: 'SF Mono', monospace; font-size: 13px; }}
+        .info-label {{ color: #94a3b8; }}
+        .info-value {{ color: #e2e8f0; font-family: 'SF Mono', monospace; }}
         .stats-grid {{
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
+            gap: 8px;
         }}
         .stat-card {{
             background: linear-gradient(135deg, rgba(102,126,234,0.1) 0%, rgba(118,75,162,0.1) 100%);
             border: 1px solid rgba(102,126,234,0.2);
-            border-radius: 12px;
-            padding: 16px;
+            border-radius: 8px;
+            padding: 12px;
             text-align: center;
         }}
         .stat-value {{
-            font-size: 20px;
+            font-size: 16px;
             font-weight: 700;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }}
         .stat-label {{
-            font-size: 11px;
+            font-size: 10px;
             color: #94a3b8;
             text-transform: uppercase;
-            margin-top: 4px;
+            margin-top: 2px;
         }}
         #histogram-plot, #heatmap-plot {{
             width: 100%;
-            height: 180px;
-            border-radius: 12px;
-            overflow: hidden;
-        }}
-        #data-table-container {{
-            max-height: 300px;
-            overflow: auto;
-            background: rgba(0,0,0,0.2);
+            height: 140px;
             border-radius: 8px;
-            padding: 8px;
-        }}
-        .data-table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-family: 'SF Mono', monospace;
-            font-size: 11px;
-        }}
-        .data-table td {{
-            padding: 4px 6px;
-            border: 1px solid rgba(255,255,255,0.1);
-            text-align: right;
-            color: #a5b4fc;
-        }}
-        .data-table tr:nth-child(even) {{
-            background: rgba(255,255,255,0.03);
-        }}
-        .data-table .positive {{ color: #4ade80; }}
-        .data-table .negative {{ color: #f87171; }}
-        .data-table .zero {{ color: #94a3b8; }}
-        #dim-selector {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 12px;
-        }}
-        .dim-control {{
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            background: rgba(255,255,255,0.05);
-            padding: 6px 10px;
-            border-radius: 6px;
-            font-size: 12px;
-        }}
-        .dim-control label {{
-            color: #94a3b8;
-        }}
-        .dim-control select, .dim-control input {{
-            background: rgba(0,0,0,0.3);
-            border: 1px solid rgba(255,255,255,0.2);
-            border-radius: 4px;
-            color: #e2e8f0;
-            padding: 4px 8px;
-            font-size: 12px;
-            width: 70px;
-        }}
-        .dim-control input[type="range"] {{
-            width: 80px;
-        }}
-        .dim-value {{
-            color: #a5b4fc;
-            font-family: monospace;
-            min-width: 30px;
+            overflow: hidden;
         }}
         .placeholder {{
             display: flex;
             align-items: center;
             justify-content: center;
-            height: 200px;
+            height: 150px;
             color: #64748b;
-            font-size: 14px;
+            font-size: 13px;
+        }}
+        /* Memory panel */
+        #memory-panel {{
+            grid-area: memory;
+            background: rgba(22, 33, 62, 0.95);
+            border-top: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }}
+        .memory-header {{
+            display: flex;
+            align-items: center;
+            padding: 10px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            gap: 16px;
+        }}
+        .memory-header h3 {{
+            font-size: 13px;
+            font-weight: 600;
+            color: #f59e0b;
+        }}
+        .strategy-select {{
+            padding: 5px 10px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 4px;
+            color: #e2e8f0;
+            font-size: 12px;
+            cursor: pointer;
+        }}
+        .memory-stats {{
+            display: flex;
+            gap: 20px;
+            margin-left: auto;
+            font-size: 12px;
+        }}
+        .memory-stats span {{
+            color: #94a3b8;
+        }}
+        .memory-stats strong {{
+            color: #10b981;
+        }}
+        #memory-chart {{
+            flex: 1;
+            min-height: 0;
         }}
         /* Graph styles */
         .node {{ cursor: pointer; }}
         .node rect {{
-            rx: 10; ry: 10;
+            rx: 8; ry: 8;
             stroke-width: 2px;
-            filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3));
+            filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
             transition: all 0.2s;
         }}
         .node:hover rect {{
-            filter: drop-shadow(0 8px 25px rgba(102,126,234,0.4));
-            transform: scale(1.02);
+            filter: drop-shadow(0 4px 12px rgba(102,126,234,0.4));
         }}
         .node.selected rect {{
             stroke: #667eea !important;
             stroke-width: 3px;
-            filter: drop-shadow(0 0 20px rgba(102,126,234,0.6));
+            filter: drop-shadow(0 0 15px rgba(102,126,234,0.6));
+        }}
+        .node.highlighted rect {{
+            stroke: #f59e0b !important;
+            stroke-width: 3px;
+            filter: drop-shadow(0 0 15px rgba(245,158,11,0.6));
+        }}
+        .node.dimmed {{
+            opacity: 0.3;
         }}
         .node text {{ fill: white; pointer-events: none; }}
-        .node-name {{ font-size: 12px; font-weight: 600; }}
-        .node-shape {{ font-size: 10px; opacity: 0.7; }}
+        .node-name {{ font-size: 11px; font-weight: 600; }}
+        .node-shape {{ font-size: 9px; opacity: 0.7; }}
         .link {{
             fill: none;
-            stroke: rgba(255,255,255,0.2);
-            stroke-width: 2px;
+            stroke: rgba(255,255,255,0.15);
+            stroke-width: 1.5px;
         }}
         .link.highlighted {{
             stroke: #667eea;
-            stroke-width: 3px;
+            stroke-width: 2px;
         }}
-        .link.flow {{
-            stroke: #10b981;
-            stroke-width: 3px;
-            stroke-dasharray: 10,5;
-            animation: dash 0.5s linear infinite;
-        }}
-        @keyframes dash {{ to {{ stroke-dashoffset: -15; }} }}
         /* Node colors */
-        .node-input rect {{ fill: linear-gradient(135deg, #10b981 0%, #059669 100%); fill: #10b981; stroke: #059669; }}
+        .node-input rect {{ fill: #10b981; stroke: #059669; }}
         .node-output rect {{ fill: #ef4444; stroke: #dc2626; }}
         .node-matmul rect {{ fill: #3b82f6; stroke: #2563eb; }}
         .node-activation rect {{ fill: #8b5cf6; stroke: #7c3aed; }}
         .node-elementwise rect {{ fill: #f59e0b; stroke: #d97706; }}
-        /* Small weight nodes */
-        .node-small rect {{ rx: 6; ry: 6; opacity: 0.85; }}
-        .node-small text {{ font-size: 10px; }}
         .node-norm rect {{ fill: #14b8a6; stroke: #0d9488; }}
         .node-reshape rect {{ fill: #f97316; stroke: #ea580c; }}
         .node-weight rect {{ fill: #6b7280; stroke: #4b5563; }}
         .node-function rect {{ fill: #374151; stroke: #4b5563; }}
         .node-other rect {{ fill: #374151; stroke: #4b5563; }}
+        .node-small rect {{ rx: 5; ry: 5; opacity: 0.85; }}
+        .node-small text {{ font-size: 9px; }}
         .order-badge {{
             fill: #fbbf24;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 700;
         }}
         .legend {{
-            padding: 16px 20px;
+            padding: 12px 16px;
             border-top: 1px solid rgba(255,255,255,0.1);
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
         }}
         .legend-item {{
             display: flex;
             align-items: center;
-            gap: 8px;
-            font-size: 12px;
+            gap: 6px;
+            font-size: 11px;
             color: #94a3b8;
         }}
         .legend-dot {{
+            width: 10px;
+            height: 10px;
+            border-radius: 3px;
+        }}
+        /* Memory chart legend */
+        .memory-legend {{
+            display: flex;
+            gap: 16px;
+            padding: 8px 16px;
+            font-size: 11px;
+            color: #94a3b8;
+            border-top: 1px solid rgba(255,255,255,0.05);
+        }}
+        .memory-legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .memory-legend-dot {{
             width: 12px;
-            height: 12px;
-            border-radius: 4px;
+            height: 4px;
+            border-radius: 2px;
         }}
     </style>
 </head>
@@ -475,9 +694,14 @@ class GraphVisualizer:
     <div id="app">
         <header>
             <h1>ONNX Parser Visualizer</h1>
+            <div class="nav-tabs">
+                <button class="nav-tab active" data-view="all" onclick="setView('all')">All</button>
+                <button class="nav-tab" data-view="graph" onclick="setView('graph')">Graph</button>
+                <button class="nav-tab" data-view="sidebar" onclick="setView('sidebar')">Node Info</button>
+                <button class="nav-tab" data-view="memory" onclick="setView('memory')">Memory</button>
+            </div>
             <div class="controls">
                 <button class="btn" onclick="resetView()">Reset View</button>
-                <button class="btn" id="playBtn" onclick="togglePlay()">▶ Play</button>
                 <button class="btn" id="flowBtn" onclick="toggleFlow()">Data Flow</button>
             </div>
         </header>
@@ -518,11 +742,6 @@ class GraphVisualizer:
                         <div class="section-title">Tensor Heatmap</div>
                         <div id="heatmap-plot"></div>
                     </div>
-                    <div class="section" id="data-section" style="display:none;">
-                        <div class="section-title">Tensor Data Browser</div>
-                        <div id="dim-selector"></div>
-                        <div id="data-table-container"></div>
-                    </div>
                 </div>
             </div>
             <div class="legend">
@@ -534,13 +753,36 @@ class GraphVisualizer:
                 <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div>Norm</div>
             </div>
         </div>
+        <div id="memory-panel">
+            <div class="memory-header">
+                <h3>Memory Lifetime</h3>
+                <select class="strategy-select" id="strategy-select" onchange="changeStrategy()">
+                </select>
+                <div class="memory-stats">
+                    <span>Peak: <strong id="mem-peak">-</strong> KB</span>
+                    <span>Savings: <strong id="mem-savings">-</strong>%</span>
+                </div>
+            </div>
+            <div id="memory-chart"></div>
+            <div class="memory-legend">
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#10b981"></div>Input</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#3b82f6"></div>Tensor</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#8b5cf6"></div>Reused</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#f59e0b"></div>Output</div>
+                <div class="memory-legend-item" style="margin-left:auto;color:#64748b;">Click block to highlight node</div>
+            </div>
+        </div>
     </div>
 
     <script>
         const graphData = {graph_json};
+        const memoryData = {memory_json};
         const container = document.getElementById('graph-container');
         const svg = d3.select('#graph-svg');
         const g = svg.append('g');
+        let currentStrategy = memoryData.default_strategy || 'greedy';
+        let selectedNode = null;
+        let highlightedTensor = null;
 
         // Zoom
         const zoom = d3.zoom()
@@ -552,17 +794,17 @@ class GraphVisualizer:
         svg.append('defs').append('marker')
             .attr('id', 'arrow')
             .attr('viewBox', '0 -5 10 10')
-            .attr('refX', 28)
+            .attr('refX', 25)
             .attr('refY', 0)
             .attr('orient', 'auto')
-            .attr('markerWidth', 6)
-            .attr('markerHeight', 6)
+            .attr('markerWidth', 5)
+            .attr('markerHeight', 5)
             .append('path')
             .attr('d', 'M0,-5L10,0L0,5')
-            .attr('fill', 'rgba(255,255,255,0.3)');
+            .attr('fill', 'rgba(255,255,255,0.2)');
 
-        // Layout - improved to handle weights better
-        const nodeW = 140, nodeH = 44, layerGap = 180, nodeGap = 16;
+        // Layout
+        const nodeW = 120, nodeH = 38, layerGap = 160, nodeGap = 14;
         const width = container.clientWidth, height = container.clientHeight;
         const nodeById = {{}};
         graphData.nodes.forEach(n => nodeById[n.id] = n);
@@ -584,7 +826,7 @@ class GraphVisualizer:
             function getLayer(id) {{
                 if (layers[id] !== undefined) return layers[id];
                 const node = nodeById[id];
-                if (node.type === 'weight') return -1;  // weights handled separately
+                if (node.type === 'weight') return -1;
                 const deps = incoming[id].filter(srcId => nodeById[srcId].type !== 'weight');
                 if (deps.length === 0) return layers[id] = 0;
                 return layers[id] = Math.max(...deps.map(getLayer)) + 1;
@@ -606,7 +848,7 @@ class GraphVisualizer:
 
         // Position compute nodes
         const totalWidth = (maxLayer + 1) * (nodeW + layerGap);
-        const startX = Math.max(80, (width - totalWidth) / 2);
+        const startX = Math.max(60, (width - totalWidth) / 2);
 
         Object.keys(layerNodes).forEach(l => {{
             const nodes = layerNodes[l];
@@ -618,34 +860,25 @@ class GraphVisualizer:
             }});
         }});
 
-        // Position weight nodes next to their consumers (smaller, offset to top-left)
-        const weightW = 100, weightH = 32;
+        // Position weight nodes
+        const weightW = 80, weightH = 28;
         weightNodes.forEach(n => {{
             n.isWeight = true;
             n.nodeW = weightW;
             n.nodeH = weightH;
-
-            // Find the first consumer of this weight
             const consumers = outgoing[n.id].map(id => nodeById[id]).filter(c => c.x !== undefined);
             if (consumers.length > 0) {{
                 const consumer = consumers[0];
-                // Count how many weights feed into this consumer
-                const siblingWeights = incoming[consumer.id]
-                    .map(id => nodeById[id])
-                    .filter(sib => sib.type === 'weight');
+                const siblingWeights = incoming[consumer.id].map(id => nodeById[id]).filter(sib => sib.type === 'weight');
                 const sibIdx = siblingWeights.indexOf(n);
-
-                // Stack weights vertically above/beside the consumer
-                n.x = consumer.x - weightW - 30;
-                n.y = consumer.y - 20 + sibIdx * (weightH + 8);
+                n.x = consumer.x - weightW - 25;
+                n.y = consumer.y - 15 + sibIdx * (weightH + 6);
             }} else {{
-                // Fallback: place at start
                 n.x = 20;
-                n.y = 50 + weightNodes.indexOf(n) * (weightH + 8);
+                n.y = 50 + weightNodes.indexOf(n) * (weightH + 6);
             }}
         }});
 
-        // Apply default dimensions to compute nodes
         computeNodes.forEach(n => {{
             n.nodeW = nodeW;
             n.nodeH = nodeH;
@@ -674,6 +907,7 @@ class GraphVisualizer:
             .enter()
             .append('g')
             .attr('class', d => `node node-${{d.type}}${{d.isWeight ? ' node-small' : ''}}`)
+            .attr('data-name', d => d.name)
             .attr('transform', d => `translate(${{d.x}},${{d.y}})`)
             .on('click', selectNode);
 
@@ -683,43 +917,35 @@ class GraphVisualizer:
         nodes.append('text')
             .attr('class', 'node-name')
             .attr('x', d => (d.nodeW || nodeW)/2)
-            .attr('y', d => d.isWeight ? 14 : 18)
+            .attr('y', d => d.isWeight ? 12 : 15)
             .attr('text-anchor', 'middle')
-            .style('font-size', d => d.isWeight ? '10px' : '12px')
             .text(d => {{
-                const maxLen = d.isWeight ? 12 : 16;
+                const maxLen = d.isWeight ? 10 : 14;
                 return d.name.length > maxLen ? d.name.slice(0, maxLen-2)+'..' : d.name;
             }});
         nodes.filter(d => !d.isWeight).append('text')
             .attr('class', 'node-shape')
             .attr('x', d => (d.nodeW || nodeW)/2)
-            .attr('y', 34)
+            .attr('y', 28)
             .attr('text-anchor', 'middle')
-            .text(d => d.shape ? JSON.stringify(d.shape) : '');
-        nodes.filter(d => d.isWeight).append('text')
-            .attr('class', 'node-shape')
-            .attr('x', d => (d.nodeW || nodeW)/2)
-            .attr('y', 26)
-            .attr('text-anchor', 'middle')
-            .style('font-size', '9px')
             .text(d => d.shape ? JSON.stringify(d.shape) : '');
 
-        // Order badges (only for non-weight nodes)
+        // Order badges
         const badgeNodes = nodes.filter(d => !d.isWeight);
-        badgeNodes.append('circle').attr('cx', -6).attr('cy', -6).attr('r', 10).attr('fill', '#fbbf24');
+        badgeNodes.append('circle').attr('cx', -5).attr('cy', -5).attr('r', 8).attr('fill', '#fbbf24');
         badgeNodes.append('text')
             .attr('class', 'order-badge')
-            .attr('x', -6).attr('y', -2)
+            .attr('x', -5).attr('y', -2)
             .attr('text-anchor', 'middle')
-            .style('font-size', '10px')
             .text((d,i) => i+1);
 
         // Node selection
         function selectNode(e, d) {{
-            d3.selectAll('.node').classed('selected', false);
+            d3.selectAll('.node').classed('selected', false).classed('dimmed', false);
             d3.selectAll('.link').classed('highlighted', false);
             d3.select(this).classed('selected', true);
             links.classed('highlighted', l => l.source === d.id || l.target === d.id);
+            selectedNode = d;
 
             document.getElementById('placeholder').style.display = 'none';
             document.getElementById('details').style.display = 'block';
@@ -740,7 +966,6 @@ class GraphVisualizer:
                 document.getElementById('stat-mean').textContent = d.mean.toFixed(4);
                 document.getElementById('stat-std').textContent = d.std.toFixed(4);
 
-                // Histogram with Plotly
                 if (d.histogram) {{
                     histSection.style.display = 'block';
                     Plotly.newPlot('histogram-plot', [{{
@@ -750,11 +975,11 @@ class GraphVisualizer:
                             color: 'rgba(102, 126, 234, 0.7)',
                             line: {{ color: 'rgba(102, 126, 234, 1)', width: 1 }}
                         }},
-                        nbinsx: 30
+                        nbinsx: 25
                     }}], {{
                         paper_bgcolor: 'transparent',
                         plot_bgcolor: 'transparent',
-                        margin: {{ t: 10, r: 10, b: 30, l: 40 }},
+                        margin: {{ t: 5, r: 5, b: 25, l: 35 }},
                         xaxis: {{ color: '#94a3b8', gridcolor: 'rgba(255,255,255,0.1)' }},
                         yaxis: {{ color: '#94a3b8', gridcolor: 'rgba(255,255,255,0.1)' }},
                         bargap: 0.05
@@ -763,139 +988,31 @@ class GraphVisualizer:
                     histSection.style.display = 'none';
                 }}
 
-                // Heatmap with Plotly
                 if (d.heatmap) {{
                     heatSection.style.display = 'block';
                     Plotly.newPlot('heatmap-plot', [{{
                         z: d.heatmap,
                         type: 'heatmap',
-                        colorscale: [
-                            [0, '#3b0764'],
-                            [0.25, '#7c3aed'],
-                            [0.5, '#a78bfa'],
-                            [0.75, '#c4b5fd'],
-                            [1, '#f5f3ff']
-                        ],
-                        showscale: true,
-                        colorbar: {{
-                            thickness: 15,
-                            tickfont: {{ color: '#94a3b8' }}
-                        }}
+                        colorscale: [[0, '#3b0764'], [0.5, '#7c3aed'], [1, '#f5f3ff']],
+                        showscale: false,
                     }}], {{
                         paper_bgcolor: 'transparent',
                         plot_bgcolor: 'transparent',
-                        margin: {{ t: 10, r: 60, b: 30, l: 40 }},
+                        margin: {{ t: 5, r: 5, b: 25, l: 35 }},
                         xaxis: {{ color: '#94a3b8', showgrid: false }},
                         yaxis: {{ color: '#94a3b8', showgrid: false, autorange: 'reversed' }}
                     }}, {{ responsive: true, displayModeBar: false }});
                 }} else {{
                     heatSection.style.display = 'none';
                 }}
-
-                // Dimension browser
-                const dataSection = document.getElementById('data-section');
-                if (d.full_data && d.shape) {{
-                    dataSection.style.display = 'block';
-                    currentTensorData = d.full_data;
-                    currentTensorShape = d.shape;
-                    currentDimIndices = d.shape.map(() => 0);
-                    renderDimSelector(d.shape);
-                    updateDataTable();
-                }} else {{
-                    dataSection.style.display = 'none';
-                }}
             }} else {{
                 statsSection.style.display = 'none';
                 histSection.style.display = 'none';
                 heatSection.style.display = 'none';
-                document.getElementById('data-section').style.display = 'none';
-            }}
-        }}
-
-        // Tensor data browser state
-        let currentTensorData = null;
-        let currentTensorShape = [];
-        let currentDimIndices = [];
-
-        function renderDimSelector(shape) {{
-            const container = document.getElementById('dim-selector');
-            if (shape.length <= 2) {{
-                container.innerHTML = '<span style="color:#94a3b8;font-size:12px;">Showing full 2D slice</span>';
-                return;
             }}
 
-            let html = '';
-            // For dims > 2, we need sliders for all but last 2 dims
-            for (let i = 0; i < shape.length - 2; i++) {{
-                html += `
-                    <div class="dim-control">
-                        <label>Dim ${{i}}</label>
-                        <input type="range" min="0" max="${{shape[i] - 1}}" value="0"
-                               onchange="updateDimIndex(${{i}}, this.value)">
-                        <span class="dim-value" id="dim-val-${{i}}">0</span>
-                        <span style="color:#64748b;">/ ${{shape[i] - 1}}</span>
-                    </div>
-                `;
-            }}
-            container.innerHTML = html;
-        }}
-
-        function updateDimIndex(dimIdx, value) {{
-            currentDimIndices[dimIdx] = parseInt(value);
-            document.getElementById(`dim-val-${{dimIdx}}`).textContent = value;
-            updateDataTable();
-        }}
-
-        function getSlice(data, indices) {{
-            let slice = data;
-            for (let i = 0; i < indices.length - 2 && i < indices.length; i++) {{
-                if (Array.isArray(slice)) {{
-                    slice = slice[indices[i]] || slice[0];
-                }}
-            }}
-            return slice;
-        }}
-
-        function updateDataTable() {{
-            const container = document.getElementById('data-table-container');
-            if (!currentTensorData) return;
-
-            // Get 2D slice based on current indices
-            let slice = getSlice(currentTensorData, currentDimIndices);
-
-            // Render as table
-            let html = '<table class="data-table">';
-
-            if (Array.isArray(slice) && Array.isArray(slice[0])) {{
-                // 2D data
-                for (let i = 0; i < slice.length; i++) {{
-                    html += '<tr>';
-                    const row = slice[i];
-                    for (let j = 0; j < row.length; j++) {{
-                        const val = parseFloat(row[j]);
-                        const cls = val > 0.001 ? 'positive' : val < -0.001 ? 'negative' : 'zero';
-                        html += `<td class="${{cls}}">${{val.toFixed(4)}}</td>`;
-                    }}
-                    html += '</tr>';
-                }}
-            }} else if (Array.isArray(slice)) {{
-                // 1D data
-                html += '<tr>';
-                for (let i = 0; i < slice.length; i++) {{
-                    const val = parseFloat(slice[i]);
-                    const cls = val > 0.001 ? 'positive' : val < -0.001 ? 'negative' : 'zero';
-                    html += `<td class="${{cls}}">${{val.toFixed(4)}}</td>`;
-                }}
-                html += '</tr>';
-            }} else {{
-                // Scalar
-                const val = parseFloat(slice);
-                const cls = val > 0.001 ? 'positive' : val < -0.001 ? 'negative' : 'zero';
-                html += `<tr><td class="${{cls}}">${{val.toFixed(4)}}</td></tr>`;
-            }}
-
-            html += '</table>';
-            container.innerHTML = html;
+            // Highlight corresponding memory block
+            highlightMemoryBlock(d.name);
         }}
 
         // Search
@@ -907,47 +1024,274 @@ class GraphVisualizer:
         // Reset view
         function resetView() {{
             const bounds = g.node().getBBox();
-            const scale = Math.min(width/(bounds.width+100), height/(bounds.height+100)) * 0.85;
+            const scale = Math.min(width/(bounds.width+80), height/(bounds.height+80)) * 0.85;
             const tx = (width - bounds.width*scale)/2 - bounds.x*scale;
             const ty = (height - bounds.height*scale)/2 - bounds.y*scale;
             svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
         }}
 
-        // Animation
-        let playing = false, step = 0;
-        function togglePlay() {{
-            playing = !playing;
-            document.getElementById('playBtn').textContent = playing ? '⏸ Pause' : '▶ Play';
-            document.getElementById('playBtn').classList.toggle('active', playing);
-            if (playing) {{ step = 0; runStep(); }}
-        }}
-        function runStep() {{
-            if (!playing) return;
-            nodes.style('opacity', (d,i) => i <= step ? 1 : 0.2);
-            links.style('opacity', e => {{
-                const ti = graphData.nodes.findIndex(n => n.id === e.target);
-                return ti <= step ? 1 : 0.1;
-            }});
-            if (step < graphData.nodes.length - 1) {{
-                step++;
-                setTimeout(runStep, 350);
-            }} else {{
-                playing = false;
-                document.getElementById('playBtn').textContent = '▶ Play';
-                document.getElementById('playBtn').classList.remove('active');
-                setTimeout(() => {{ nodes.style('opacity', 1); links.style('opacity', 1); }}, 400);
-            }}
-        }}
-
-        // Data flow
+        // Data flow animation
         let flowActive = false;
         function toggleFlow() {{
             flowActive = !flowActive;
             document.getElementById('flowBtn').classList.toggle('active', flowActive);
-            links.classed('flow', flowActive);
+            if (flowActive) {{
+                links.style('stroke-dasharray', '8,4').style('animation', 'dash 0.5s linear infinite');
+            }} else {{
+                links.style('stroke-dasharray', null).style('animation', null);
+            }}
         }}
 
+        // View switching
+        let currentView = 'all';
+        function setView(view) {{
+            currentView = view;
+            const app = document.getElementById('app');
+            app.className = '';
+            if (view !== 'all') {{
+                app.classList.add('focus-' + view);
+            }}
+            // Update nav tabs
+            document.querySelectorAll('.nav-tab').forEach(tab => {{
+                tab.classList.toggle('active', tab.dataset.view === view);
+            }});
+            // Re-render charts after layout change
+            setTimeout(() => {{
+                if (view === 'all' || view === 'graph') {{
+                    resetView();
+                }}
+                if (view === 'all' || view === 'memory') {{
+                    renderMemoryChart();
+                }}
+            }}, 50);
+        }}
+
+        // === Memory visualization ===
+        function initMemoryPanel() {{
+            if (!memoryData.available) {{
+                document.getElementById('memory-chart').innerHTML =
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">Memory analysis not available</div>';
+                return;
+            }}
+
+            const select = document.getElementById('strategy-select');
+            const strategies = Object.keys(memoryData.strategies);
+            select.innerHTML = strategies.map(s =>
+                `<option value="${{s}}" ${{s === currentStrategy ? 'selected' : ''}}>${{formatStrategyName(s)}}</option>`
+            ).join('');
+
+            renderMemoryChart();
+        }}
+
+        function formatStrategyName(name) {{
+            return name.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+        }}
+
+        function changeStrategy() {{
+            currentStrategy = document.getElementById('strategy-select').value;
+            renderMemoryChart();
+        }}
+
+        function renderMemoryChart() {{
+            if (!memoryData.available || !memoryData.strategies[currentStrategy]) return;
+
+            const stratData = memoryData.strategies[currentStrategy];
+            if (stratData.error) {{
+                document.getElementById('memory-chart').innerHTML =
+                    `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ef4444;">Error: ${{stratData.error}}</div>`;
+                return;
+            }}
+
+            // Update stats
+            document.getElementById('mem-peak').textContent = stratData.summary.peak_min_kb.toFixed(1);
+            document.getElementById('mem-savings').textContent = stratData.summary.savings_pct.toFixed(1);
+
+            const tensors = stratData.tensors;
+            if (!tensors || tensors.length === 0) {{
+                document.getElementById('memory-chart').innerHTML =
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">No tensor data</div>';
+                return;
+            }}
+
+            // Sort tensors by birth time for better visualization
+            tensors.sort((a, b) => a.birth - b.birth);
+
+            // Create Gantt-style chart
+            const maxStep = Math.max(...tensors.map(t => t.death)) + 1;
+
+            const traces = tensors.map((t, idx) => {{
+                let color;
+                if (t.is_input) color = '#10b981';
+                else if (t.is_output) color = '#f59e0b';
+                else if (t.reused_from) color = '#8b5cf6';
+                else color = '#3b82f6';
+
+                return {{
+                    x: [t.death - t.birth + 1],
+                    y: [t.name],
+                    type: 'bar',
+                    orientation: 'h',
+                    base: [t.birth],
+                    marker: {{ color: color, line: {{ color: 'rgba(255,255,255,0.3)', width: 1 }} }},
+                    hovertemplate: `<b>${{t.name}}</b><br>Shape: ${{JSON.stringify(t.shape)}}<br>Size: ${{t.size_kb.toFixed(2)}} KB<br>Lifetime: Step ${{t.birth}} - ${{t.death}}<extra></extra>`,
+                    showlegend: false,
+                    customdata: [t],
+                }};
+            }});
+
+            const layout = {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                margin: {{ t: 10, r: 20, b: 30, l: 120 }},
+                xaxis: {{
+                    title: {{ text: 'Execution Step', font: {{ size: 11, color: '#94a3b8' }} }},
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.05)',
+                    range: [-0.5, maxStep + 0.5],
+                }},
+                yaxis: {{
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.03)',
+                    tickfont: {{ size: 10 }},
+                }},
+                barmode: 'overlay',
+                hovermode: 'closest',
+            }};
+
+            Plotly.newPlot('memory-chart', traces, layout, {{
+                responsive: true,
+                displayModeBar: false,
+            }});
+
+            // Click handler for memory blocks
+            document.getElementById('memory-chart').on('plotly_click', function(eventData) {{
+                const tensor = eventData.points[0].customdata;
+                if (tensor) {{
+                    highlightGraphNode(tensor.name);
+                }}
+            }});
+        }}
+
+        function highlightGraphNode(tensorName) {{
+            // Clear previous highlights
+            d3.selectAll('.node').classed('highlighted', false).classed('dimmed', false);
+
+            // Find matching node
+            const matchingNode = graphData.nodes.find(n => n.name === tensorName);
+            if (matchingNode) {{
+                // Dim all other nodes
+                d3.selectAll('.node').classed('dimmed', true);
+
+                // Highlight matching node
+                d3.select(`.node[data-name="${{tensorName}}"]`)
+                    .classed('highlighted', true)
+                    .classed('dimmed', false);
+
+                highlightedTensor = tensorName;
+
+                // Also highlight connected edges
+                links.classed('highlighted', l => l.source === matchingNode.id || l.target === matchingNode.id);
+
+                // Pan to node
+                const node = nodeById[matchingNode.id];
+                if (node && node.x !== undefined) {{
+                    const currentTransform = d3.zoomTransform(svg.node());
+                    const targetX = width/2 - node.x * currentTransform.k - (node.nodeW || nodeW)/2 * currentTransform.k;
+                    const targetY = height/2 - node.y * currentTransform.k - (node.nodeH || nodeH)/2 * currentTransform.k;
+                    svg.transition().duration(300).call(
+                        zoom.transform,
+                        d3.zoomIdentity.translate(targetX, targetY).scale(currentTransform.k)
+                    );
+                }}
+            }}
+        }}
+
+        function highlightMemoryBlock(nodeName) {{
+            if (!memoryData.available) return;
+
+            // Re-render with highlight
+            const stratData = memoryData.strategies[currentStrategy];
+            if (!stratData || stratData.error) return;
+
+            const tensors = stratData.tensors;
+            const maxStep = Math.max(...tensors.map(t => t.death)) + 1;
+
+            const traces = tensors.map((t, idx) => {{
+                let color;
+                const isHighlighted = t.name === nodeName;
+
+                if (isHighlighted) {{
+                    color = '#fbbf24';  // Highlight color
+                }} else if (t.is_input) {{
+                    color = 'rgba(16, 185, 129, 0.4)';
+                }} else if (t.is_output) {{
+                    color = 'rgba(245, 158, 11, 0.4)';
+                }} else if (t.reused_from) {{
+                    color = 'rgba(139, 92, 246, 0.4)';
+                }} else {{
+                    color = 'rgba(59, 130, 246, 0.4)';
+                }}
+
+                return {{
+                    x: [t.death - t.birth + 1],
+                    y: [t.name],
+                    type: 'bar',
+                    orientation: 'h',
+                    base: [t.birth],
+                    marker: {{
+                        color: color,
+                        line: {{
+                            color: isHighlighted ? '#fbbf24' : 'rgba(255,255,255,0.2)',
+                            width: isHighlighted ? 2 : 1
+                        }}
+                    }},
+                    hovertemplate: `<b>${{t.name}}</b><br>Shape: ${{JSON.stringify(t.shape)}}<br>Size: ${{t.size_kb.toFixed(2)}} KB<br>Lifetime: Step ${{t.birth}} - ${{t.death}}<extra></extra>`,
+                    showlegend: false,
+                    customdata: [t],
+                }};
+            }});
+
+            const layout = {{
+                paper_bgcolor: 'transparent',
+                plot_bgcolor: 'transparent',
+                margin: {{ t: 10, r: 20, b: 30, l: 120 }},
+                xaxis: {{
+                    title: {{ text: 'Execution Step', font: {{ size: 11, color: '#94a3b8' }} }},
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.05)',
+                    range: [-0.5, maxStep + 0.5],
+                }},
+                yaxis: {{
+                    color: '#94a3b8',
+                    gridcolor: 'rgba(255,255,255,0.03)',
+                    tickfont: {{ size: 10 }},
+                }},
+                barmode: 'overlay',
+                hovermode: 'closest',
+            }};
+
+            Plotly.react('memory-chart', traces, layout, {{
+                responsive: true,
+                displayModeBar: false,
+            }});
+        }}
+
+        // Clear highlights when clicking empty space
+        svg.on('click', function(e) {{
+            if (e.target === svg.node()) {{
+                d3.selectAll('.node').classed('selected', false).classed('highlighted', false).classed('dimmed', false);
+                d3.selectAll('.link').classed('highlighted', false);
+                selectedNode = null;
+                highlightedTensor = null;
+                document.getElementById('placeholder').style.display = 'flex';
+                document.getElementById('details').style.display = 'none';
+                renderMemoryChart();  // Reset memory chart colors
+            }}
+        }});
+
+        // Initialize
         resetView();
+        initMemoryPanel();
     </script>
 </body>
 </html>'''
@@ -959,6 +1303,17 @@ class GraphVisualizer:
         print(f"Saved: {path}")
 
     def serve(self, port: int = 8080, open_browser: bool = True) -> None:
+        os.environ[_VISUALIZER_MARKER] = str(port)
+
+        if _is_port_in_use(port):
+            print(f"Port {port} is in use, checking for existing visualizer...")
+            if _kill_existing_visualizer(port):
+                print("Killed existing visualizer, restarting...")
+                import time
+                time.sleep(0.5)
+            else:
+                print(f"Port {port} is in use by another process, trying to start anyway...")
+
         html = self.to_html()
 
         class Handler(http.server.BaseHTTPRequestHandler):

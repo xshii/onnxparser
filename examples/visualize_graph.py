@@ -6,7 +6,7 @@ sys.path.insert(0, ".")
 
 import torch
 from onnxparser.builder import GraphBuilder
-from onnxparser.visualizer import visualize, serve
+from onnxparser.visualizer import visualize, serve, serve_dynamic
 
 
 def build_mlp():
@@ -237,10 +237,22 @@ def main():
         visualize(gm, args.save, input_data=input_data)
         print("Done!")
     else:
-        print(f"\nStarting visualization server on port {args.port}...")
+        print(f"\nStarting Flask visualization server on port {args.port}...")
         print(f"Open http://localhost:{args.port} in your browser")
         print("Press Ctrl+C to stop\n")
-        serve(gm, port=args.port, input_data=input_data)
+
+        # Convert to dict format for serve_dynamic
+        model_name = args.model.upper()
+        models = {model_name: gm}
+        input_data_dict = {model_name: input_data} if input_data else {}
+
+        serve_dynamic(
+            models=models,
+            input_data=input_data_dict,
+            port=args.port,
+            open_browser=False,
+            debug=False,
+        )
 
 
 if __name__ == "__main__":

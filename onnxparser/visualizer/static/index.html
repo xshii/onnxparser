@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ONNX Parser Visualizer</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>ONNX Parser Visualizer</h1>
+            <select class="model-select" id="model-select" onchange="app.loadModel()">
+                <option value="">Select Model...</option>
+            </select>
+            <button class="btn" onclick="app.refreshModels()" title="Refresh model list">Refresh</button>
+            <div class="nav-tabs">
+                <button class="nav-tab active" data-view="all" onclick="app.setView('all')">All</button>
+                <button class="nav-tab" data-view="graph" onclick="app.setView('graph')">Graph</button>
+                <button class="nav-tab" data-view="sidebar" onclick="app.setView('sidebar')">Node Info</button>
+                <button class="nav-tab" data-view="memory" onclick="app.setView('memory')">Memory</button>
+            </div>
+            <div class="controls">
+                <button class="btn" onclick="app.reloadModel()" id="reloadBtn" disabled>Reload</button>
+                <button class="btn" onclick="app.resetGraphView()" id="resetBtn" disabled>Reset View</button>
+                <button class="btn" id="flowBtn" onclick="app.toggleFlow()" disabled>Data Flow</button>
+            </div>
+        </header>
+        <div id="graph-container">
+            <div class="no-model" id="no-model">
+                <div class="no-model-icon">📊</div>
+                <div>Select a model to visualize</div>
+            </div>
+            <svg id="graph-svg" style="display:none;"></svg>
+        </div>
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <input type="text" id="search" placeholder="Search nodes...">
+            </div>
+            <div class="sidebar-content">
+                <div id="placeholder" class="placeholder">Click a node to view details</div>
+                <div id="details" style="display:none;">
+                    <div class="section">
+                        <div class="section-title">Node Info</div>
+                        <div class="info-grid">
+                            <div class="info-row"><span class="info-label">Name</span><span class="info-value" id="info-name">-</span></div>
+                            <div class="info-row"><span class="info-label">Op</span><span class="info-value" id="info-op">-</span></div>
+                            <div class="info-row"><span class="info-label">Target</span><span class="info-value" id="info-target">-</span></div>
+                            <div class="info-row"><span class="info-label">Shape</span><span class="info-value" id="info-shape">-</span></div>
+                            <div class="info-row"><span class="info-label">Dtype</span><span class="info-value" id="info-dtype">-</span></div>
+                        </div>
+                    </div>
+                    <div class="section" id="stats-section" style="display:none;">
+                        <div class="section-title">Statistics</div>
+                        <div class="stats-grid">
+                            <div class="stat-card"><div class="stat-value" id="stat-min">-</div><div class="stat-label">Min</div></div>
+                            <div class="stat-card"><div class="stat-value" id="stat-max">-</div><div class="stat-label">Max</div></div>
+                            <div class="stat-card"><div class="stat-value" id="stat-mean">-</div><div class="stat-label">Mean</div></div>
+                            <div class="stat-card"><div class="stat-value" id="stat-std">-</div><div class="stat-label">Std</div></div>
+                        </div>
+                    </div>
+                    <div class="section" id="insights-section" style="display:none;">
+                        <div class="section-title">Analysis Insights</div>
+                        <div id="insights-list" class="insights-list"></div>
+                    </div>
+                    <div class="section" id="histogram-section" style="display:none;">
+                        <div class="section-title">Distribution</div>
+                        <div id="histogram-plot"></div>
+                    </div>
+                    <div class="section" id="heatmap-section" style="display:none;">
+                        <div class="section-title">Tensor Heatmap</div>
+                        <div class="heatmap-controls" id="heatmap-controls"></div>
+                        <div id="heatmap-plot"></div>
+                    </div>
+                    <div class="section" id="values-section" style="display:none;">
+                        <div class="section-title">Data Preview</div>
+                        <div class="values-controls" id="values-controls"></div>
+                        <div id="values-preview" class="values-preview"></div>
+                    </div>
+                </div>
+            </div>
+            <div class="legend">
+                <div class="legend-item"><div class="legend-dot" style="background:#10b981"></div>Input</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#ef4444"></div>Output</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#3b82f6"></div>MatMul</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#8b5cf6"></div>Activation</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#f59e0b"></div>Elementwise</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#14b8a6"></div>Norm</div>
+            </div>
+        </div>
+        <div id="memory-panel">
+            <div class="memory-header">
+                <h3>Memory</h3>
+                <div class="memory-view-tabs">
+                    <button class="mem-tab active" data-view="lifetime" onclick="app.setMemoryView('lifetime')">Lifetime</button>
+                    <button class="mem-tab" data-view="layout" onclick="app.setMemoryView('layout')">Layout</button>
+                </div>
+                <select class="strategy-select" id="strategy-select" onchange="app.changeStrategy()">
+                </select>
+                <div class="memory-stats">
+                    <span>Peak: <strong id="mem-peak">-</strong> KB</span>
+                    <span>Savings: <strong id="mem-savings">-</strong>%</span>
+                </div>
+            </div>
+            <div id="memory-chart"></div>
+            <div class="memory-legend" id="memory-legend-lifetime">
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#10b981"></div>Input</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#3b82f6"></div>Tensor</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#8b5cf6"></div>Reused</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#f59e0b"></div>Output</div>
+                <div class="memory-legend-item" style="margin-left:auto;color:#64748b;">Click block to highlight node</div>
+            </div>
+            <div class="memory-legend" id="memory-legend-layout" style="display:none;">
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#10b981"></div>Input</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#3b82f6"></div>Tensor</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#f59e0b"></div>Output</div>
+                <div class="memory-legend-item" style="margin-left:auto;color:#64748b;">Y: Address | X: TID</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
