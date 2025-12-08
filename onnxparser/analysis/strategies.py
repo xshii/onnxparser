@@ -579,6 +579,205 @@ class InplaceStrategy(AllocationStrategy):
         return max_end, None
 
 
+@StrategyRegistry.register("optimal")
+class OptimalStrategy(AllocationStrategy):
+    """
+    Optimal allocation using weighted scoring function.
+
+    Based on mathematical optimization theory combining:
+    1. Size Fit Score - minimize internal fragmentation
+    2. Temporal Locality Score - prefer reusing recently freed blocks (cache locality)
+    3. Reuse Distribution Score - balance reuse across blocks (reduce hotspots)
+    4. Memory Locality Score - prefer lower addresses (spatial locality)
+
+    Score formula:
+        score = w1 * size_fit + w2 * temporal + w3 * reuse_balance + w4 * spatial
+
+    Inspired by:
+    - Linear Scan Register Allocation (Poletto & Sarkar, 1999)
+    - Weighted Interval Scheduling
+    - Cache-oblivious algorithms
+    """
+
+    def __init__(
+        self,
+        w_size_fit: float = 0.4,      # Weight for size fitting
+        w_temporal: float = 0.3,       # Weight for temporal locality
+        w_reuse_balance: float = 0.2,  # Weight for reuse distribution
+        w_spatial: float = 0.1,        # Weight for spatial locality
+    ):
+        super().__init__()
+        self.w_size_fit = w_size_fit
+        self.w_temporal = w_temporal
+        self.w_reuse_balance = w_reuse_balance
+        self.w_spatial = w_spatial
+        # Track reuse counts per offset
+        self._reuse_counts: Dict[int, int] = {}
+        self._max_offset = 0
+
+    @property
+    def name(self) -> str:
+        return "optimal"
+
+    def reset(self) -> None:
+        super().reset()
+        self._reuse_counts = {}
+        self._max_offset = 0
+
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Find optimal offset using weighted scoring function"""
+        if not allocated_blocks:
+            return 0, None
+
+        # Find all candidate blocks (dead before birth)
+        candidates = [
+            b for b in allocated_blocks
+            if b.death_step < birth and b.size >= size
+        ]
+
+        if candidates:
+            # Score each candidate
+            best_block = None
+            best_score = float('-inf')
+
+            # Get max values for normalization
+            max_size = max(b.size for b in candidates)
+            max_gap = max(birth - b.death_step for b in candidates)
+            max_reuse = max(self._reuse_counts.get(b.offset, 0) for b in candidates) + 1
+
+            for block in candidates:
+                score = self._compute_score(
+                    block, size, birth, max_size, max_gap, max_reuse
+                )
+                if score > best_score:
+                    best_score = score
+                    best_block = block
+
+            if best_block:
+                # Update reuse count
+                self._reuse_counts[best_block.offset] = \
+                    self._reuse_counts.get(best_block.offset, 0) + 1
+                return best_block.offset, best_block.tensor_name
+
+        # No reusable block - find gap or allocate at end
+        return self._find_gap_or_end(size, birth, allocated_blocks)
+
+    def _compute_score(
+        self,
+        block: MemoryBlock,
+        required_size: int,
+        birth: int,
+        max_size: int,
+        max_gap: int,
+        max_reuse: int,
+    ) -> float:
+        """
+        Compute weighted score for a candidate block.
+
+        Mathematical formulation:
+        - size_fit ∈ [0,1]: 1 - (waste / max_possible_waste)
+        - temporal ∈ [0,1]: 1 / (1 + normalized_gap)
+        - reuse_balance ∈ [0,1]: 1 - (reuse_count / max_reuse)
+        - spatial ∈ [0,1]: 1 - (offset / max_offset)
+        """
+        # 1. Size Fit Score (minimize internal fragmentation)
+        # Perfect fit = 1.0, larger blocks get lower scores
+        waste = block.size - required_size
+        size_fit = 1.0 - (waste / max_size) if max_size > 0 else 1.0
+
+        # 2. Temporal Locality Score (prefer recently freed blocks)
+        # Smaller gap = higher score (better cache locality)
+        gap = birth - block.death_step - 1
+        temporal = 1.0 / (1.0 + gap / max_gap) if max_gap > 0 else 1.0
+
+        # 3. Reuse Balance Score (distribute reuse evenly)
+        # Less reused blocks get higher scores
+        reuse_count = self._reuse_counts.get(block.offset, 0)
+        reuse_balance = 1.0 - (reuse_count / max_reuse) if max_reuse > 0 else 1.0
+
+        # 4. Spatial Locality Score (prefer lower addresses)
+        # Lower offset = higher score
+        spatial = 1.0 - (block.offset / self._max_offset) if self._max_offset > 0 else 1.0
+
+        # Weighted sum
+        score = (
+            self.w_size_fit * size_fit +
+            self.w_temporal * temporal +
+            self.w_reuse_balance * reuse_balance +
+            self.w_spatial * spatial
+        )
+
+        return score
+
+    def _find_gap_or_end(
+        self,
+        size: int,
+        birth: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Find best gap or allocate at end"""
+        live_blocks = [
+            b for b in allocated_blocks
+            if b.birth_step <= birth <= b.death_step
+        ]
+
+        if not live_blocks:
+            return 0, None
+
+        live_blocks.sort(key=lambda b: b.offset)
+
+        # Find all gaps and score them
+        gaps = []
+
+        # Gap at beginning
+        if live_blocks[0].offset >= size:
+            gaps.append((0, live_blocks[0].offset))
+
+        # Gaps between blocks
+        for i in range(len(live_blocks) - 1):
+            gap_start = live_blocks[i].offset + live_blocks[i].size
+            gap_end = live_blocks[i + 1].offset
+            gap_size = gap_end - gap_start
+            if gap_size >= size:
+                gaps.append((gap_start, gap_size))
+
+        if gaps:
+            # Score gaps: prefer smaller gaps (less fragmentation) and lower addresses
+            def gap_score(gap):
+                offset, gap_size = gap
+                fit_score = 1.0 - (gap_size - size) / gap_size if gap_size > 0 else 1.0
+                pos_score = 1.0 - offset / self._max_offset if self._max_offset > 0 else 1.0
+                return 0.7 * fit_score + 0.3 * pos_score
+
+            best_gap = max(gaps, key=gap_score)
+            return best_gap[0], None
+
+        # Allocate at end
+        max_end = max(b.offset + b.size for b in live_blocks)
+        self._max_offset = max(self._max_offset, max_end + size)
+        return max_end, None
+
+    def get_reuse_statistics(self) -> Dict[str, any]:
+        """Get detailed reuse statistics for analysis"""
+        if not self._reuse_counts:
+            return {"total_reuses": 0, "unique_offsets": 0}
+
+        counts = list(self._reuse_counts.values())
+        return {
+            "total_reuses": sum(counts),
+            "unique_offsets": len(counts),
+            "max_reuse_count": max(counts) if counts else 0,
+            "avg_reuse_count": sum(counts) / len(counts) if counts else 0,
+            "reuse_distribution": dict(self._reuse_counts),
+        }
+
+
 # Keep "static" as alias for greedy (backward compatibility)
 @StrategyRegistry.register("static")
 class StaticAllocationStrategy(GreedyReuseStrategy):

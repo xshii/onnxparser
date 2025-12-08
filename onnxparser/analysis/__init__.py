@@ -18,6 +18,7 @@ from .strategies import (
     InplaceStrategy,
     BestFitStrategy,
     FirstFitStrategy,
+    OptimalStrategy,
     StaticAllocationStrategy,
     StrategyRegistry,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "InplaceStrategy",
     "BestFitStrategy",
     "FirstFitStrategy",
+    "OptimalStrategy",
     "StaticAllocationStrategy",
     "StrategyRegistry",
     # Spill Scheduler
