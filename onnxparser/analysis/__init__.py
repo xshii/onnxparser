@@ -20,6 +20,15 @@ from .strategies import (
     FirstFitStrategy,
     StrategyRegistry,
 )
+from .spill_scheduler import (
+    SpillScheduler,
+    SpillStrategy,
+    SpillDecision,
+    ScheduleResult,
+    MemoryEvent,
+    MemoryEventType,
+    schedule_spills,
+)
 
 __all__ = [
     # Analyzer
@@ -40,4 +49,12 @@ __all__ = [
     "BestFitStrategy",
     "FirstFitStrategy",
     "StrategyRegistry",
+    # Spill Scheduler
+    "SpillScheduler",
+    "SpillStrategy",
+    "SpillDecision",
+    "ScheduleResult",
+    "MemoryEvent",
+    "MemoryEventType",
+    "schedule_spills",
 ]
