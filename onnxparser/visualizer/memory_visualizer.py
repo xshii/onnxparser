@@ -119,25 +119,26 @@ class MemoryVisualizer:
         peak_memory = baseline.peak_min_memory
         peak_kb = peak_memory / 1024
 
-        # Generate schedules for different memory limits
+        # Generate schedules for a few default absolute values
         schedules = {}
 
-        # Percentage-based limits
-        pct_limits = [0.25, 0.5, 0.75, 1.0]
-        for fraction in pct_limits:
-            limit_bytes = int(peak_memory * fraction)
-            limit_label = f"{int(fraction * 100)}%"
-            self._add_schedule(schedules, limit_label, limit_bytes)
+        # Default values based on peak memory (round numbers)
+        default_limits_kb = []
+        # Add some reasonable defaults around peak memory
+        for kb in [32, 64, 128, 256, 512, 1024, 2048, 4096]:
+            if kb >= peak_kb * 0.2 and kb <= peak_kb * 1.2:
+                default_limits_kb.append(kb)
 
-        # Absolute value limits (common sizes in KB)
-        abs_limits_kb = [32, 64, 128, 256, 512, 1024, 2048, 4096]
-        for limit_kb in abs_limits_kb:
-            # Only add if it's meaningfully different from percentage-based ones
-            limit_bytes = int(limit_kb * 1024)
-            if limit_bytes < peak_memory * 1.5 and limit_bytes > peak_memory * 0.1:
-                limit_label = f"{limit_kb}KB"
-                if limit_label not in schedules:
-                    self._add_schedule(schedules, limit_label, limit_bytes)
+        # Always include peak memory rounded
+        peak_rounded = int(round(peak_kb / 10) * 10)
+        if peak_rounded > 0 and peak_rounded not in default_limits_kb:
+            default_limits_kb.append(peak_rounded)
+
+        default_limits_kb.sort()
+
+        for limit_kb in default_limits_kb:
+            limit_label = f"{limit_kb}KB"
+            self._add_schedule(schedules, limit_label, int(limit_kb * 1024))
 
         return {
             "peak_memory_kb": peak_kb,
@@ -657,19 +658,14 @@ class MemoryVisualizer:
 
                 <div id="tab-spill" class="tab-content">
                     <div class="card" style="margin-bottom:16px;">
-                        <div class="card-title">Memory Limit</div>
-                        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-                            <div style="display:flex;gap:8px;flex-wrap:wrap;" id="spill-limit-buttons"></div>
-                            <div style="display:flex;align-items:center;gap:8px;">
-                                <span style="color:#94a3b8;font-size:12px;">or</span>
-                                <input type="number" id="custom-spill-limit" placeholder="KB"
-                                    style="width:80px;padding:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#e2e8f0;font-size:13px;">
-                                <span style="color:#94a3b8;font-size:12px;">KB</span>
-                                <button class="btn" onclick="applyCustomSpillLimit()" style="padding:8px 12px;font-size:12px;">Apply</button>
-                            </div>
-                        </div>
-                        <div style="color:#94a3b8;font-size:11px;margin-top:8px;">
-                            Peak Memory: <span id="peak-memory-display"></span> KB
+                        <div class="card-title">Memory Limit (KB)</div>
+                        <div style="display:flex;align-items:center;gap:12px;">
+                            <input type="number" id="custom-spill-limit" placeholder="Enter KB"
+                                style="width:120px;padding:10px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#e2e8f0;font-size:14px;">
+                            <button class="btn" onclick="applyCustomSpillLimit()" style="padding:10px 20px;">Apply</button>
+                            <span style="color:#94a3b8;font-size:13px;">
+                                Peak Memory: <strong id="peak-memory-display" style="color:#f59e0b;"></strong> KB
+                            </span>
                         </div>
                     </div>
 
@@ -741,7 +737,7 @@ class MemoryVisualizer:
         const data = {data_json};
         let currentStrategy = 'greedy';
 
-        let currentSpillLimit = '50%';
+        let currentSpillLimit = '';
 
         // Initialize
         function init() {{
@@ -1301,28 +1297,20 @@ class MemoryVisualizer:
             // Display peak memory
             document.getElementById('peak-memory-display').textContent = spillData.peak_memory_kb?.toFixed(1) || '?';
 
-            // Render preset limit buttons
-            const btnContainer = document.getElementById('spill-limit-buttons');
-            const limits = Object.keys(spillData.schedules);
-            btnContainer.innerHTML = limits.map(limit => `
-                <button class="strategy-btn ${{limit === currentSpillLimit ? 'active' : ''}}"
-                        onclick="selectSpillLimit('${{limit}}')"
-                        style="padding:8px 16px;">
-                    <div class="name">${{limit}}</div>
-                    <div class="stats">${{spillData.schedules[limit].limit_kb?.toFixed(1) || '?'}} KB</div>
-                </button>
-            `).join('');
+            // Set default value in input if not set
+            const input = document.getElementById('custom-spill-limit');
+            if (!input.value && !currentSpillLimit) {{
+                // Default to first available schedule
+                const firstKey = Object.keys(spillData.schedules)[0];
+                if (firstKey) {{
+                    currentSpillLimit = firstKey;
+                    input.value = spillData.schedules[firstKey].limit_kb?.toFixed(0) || '';
+                }}
+            }}
 
             renderSpillChart();
             renderSpillSummary();
             renderSpillEvents();
-        }}
-
-        function selectSpillLimit(limit) {{
-            currentSpillLimit = limit;
-            // Clear custom input when selecting preset
-            document.getElementById('custom-spill-limit').value = '';
-            renderSpillScheduler();
         }}
 
         function applyCustomSpillLimit() {{
@@ -1333,18 +1321,12 @@ class MemoryVisualizer:
                 return;
             }}
 
-            // Add custom schedule on-the-fly
             const spillData = data.spill_schedules;
             const customLabel = `${{customKB.toFixed(0)}}KB`;
 
-            // Check if we already have this custom limit
+            // Check if we already have this exact limit
             if (!spillData.schedules[customLabel]) {{
-                // We need to compute this on the server, but for now we'll estimate
-                // by interpolating from existing schedules
-                const peakKB = spillData.peak_memory_kb;
-                const ratio = customKB / peakKB;
-
-                // Find closest existing schedule
+                // Find closest existing schedule to use as base
                 let closestSchedule = null;
                 let closestDiff = Infinity;
                 for (const [label, schedule] of Object.entries(spillData.schedules)) {{
@@ -1357,11 +1339,10 @@ class MemoryVisualizer:
                 }}
 
                 if (closestSchedule) {{
-                    // Create estimated schedule based on closest
+                    // Use closest schedule's data with adjusted limit
                     spillData.schedules[customLabel] = {{
                         ...closestSchedule,
                         limit_kb: customKB,
-                        estimated: true,
                     }};
                 }}
             }}
