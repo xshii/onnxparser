@@ -24,6 +24,15 @@ Usage:
     from onnxparser.executor import Runtime
     runtime = Runtime(gm)
     output = runtime.run(input_tensor)
+
+    # Memory analysis
+    from onnxparser.analysis import MemoryAnalyzer
+    analyzer = MemoryAnalyzer(gm)
+    result = analyzer.analyze()
+
+    # Memory visualization
+    from onnxparser.visualizer import visualize_memory
+    visualize_memory(gm, "memory.html")
 """
 
 __version__ = "0.1.0"
