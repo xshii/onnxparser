@@ -117,67 +117,82 @@ class MemoryVisualizer:
         # Get baseline peak memory
         baseline = self.results.get("greedy", list(self.results.values())[0])
         peak_memory = baseline.peak_min_memory
+        peak_kb = peak_memory / 1024
 
         # Generate schedules for different memory limits
         schedules = {}
-        memory_limits = [0.25, 0.5, 0.75, 1.0]  # Fractions of peak
 
-        for fraction in memory_limits:
+        # Percentage-based limits
+        pct_limits = [0.25, 0.5, 0.75, 1.0]
+        for fraction in pct_limits:
             limit_bytes = int(peak_memory * fraction)
             limit_label = f"{int(fraction * 100)}%"
+            self._add_schedule(schedules, limit_label, limit_bytes)
 
-            try:
-                scheduler = SpillScheduler(
-                    self.gm,
-                    memory_limit_bytes=limit_bytes,
-                    spill_strategy=SpillStrategy.COST_BENEFIT,
-                )
-                result = scheduler.schedule()
-
-                # Build events timeline
-                events = []
-                for e in result.events:
-                    if e.event_type in [MemoryEventType.SPILL, MemoryEventType.RELOAD]:
-                        events.append({
-                            "step": e.step,
-                            "type": e.event_type.value,
-                            "tensor": e.tensor_name,
-                            "size_kb": e.size_bytes / 1024,
-                            "node": e.node_name,
-                            "fast_kb": e.fast_memory_used / 1024,
-                            "slow_kb": e.slow_memory_used / 1024,
-                        })
-
-                schedules[limit_label] = {
-                    "limit_kb": limit_bytes / 1024,
-                    "total_spills": result.total_spills,
-                    "total_reloads": result.total_reloads,
-                    "spill_bytes_kb": result.total_spill_bytes / 1024,
-                    "peak_fast_kb": result.peak_fast_memory / 1024,
-                    "peak_slow_kb": result.peak_slow_memory / 1024,
-                    "spill_trigger_nodes": result.spill_trigger_nodes,
-                    "reload_trigger_nodes": result.reload_trigger_nodes,
-                    "events": events,
-                    "fast_timeline": [m / 1024 for m in result.fast_memory_timeline],
-                    "slow_timeline": [m / 1024 for m in result.slow_memory_timeline],
-                    "spill_decisions": [
-                        {
-                            "tensor": d.tensor_name,
-                            "size_kb": d.size_bytes / 1024,
-                            "spill_step": d.spill_step,
-                            "reload_step": d.reload_step,
-                            "duration": d.spill_duration,
-                        }
-                        for d in result.spill_decisions
-                    ],
-                }
-            except Exception:
-                schedules[limit_label] = {"error": True}
+        # Absolute value limits (common sizes in KB)
+        abs_limits_kb = [32, 64, 128, 256, 512, 1024, 2048, 4096]
+        for limit_kb in abs_limits_kb:
+            # Only add if it's meaningfully different from percentage-based ones
+            limit_bytes = int(limit_kb * 1024)
+            if limit_bytes < peak_memory * 1.5 and limit_bytes > peak_memory * 0.1:
+                limit_label = f"{limit_kb}KB"
+                if limit_label not in schedules:
+                    self._add_schedule(schedules, limit_label, limit_bytes)
 
         return {
-            "peak_memory_kb": peak_memory / 1024,
+            "peak_memory_kb": peak_kb,
             "schedules": schedules,
         }
+
+    def _add_schedule(self, schedules: Dict, label: str, limit_bytes: int) -> None:
+        """Add a spill schedule for a given memory limit"""
+        try:
+            scheduler = SpillScheduler(
+                self.gm,
+                memory_limit_bytes=limit_bytes,
+                spill_strategy=SpillStrategy.COST_BENEFIT,
+            )
+            result = scheduler.schedule()
+
+            # Build events timeline
+            events = []
+            for e in result.events:
+                if e.event_type in [MemoryEventType.SPILL, MemoryEventType.RELOAD]:
+                    events.append({
+                        "step": e.step,
+                        "type": e.event_type.value,
+                        "tensor": e.tensor_name,
+                        "size_kb": e.size_bytes / 1024,
+                        "node": e.node_name,
+                        "fast_kb": e.fast_memory_used / 1024,
+                        "slow_kb": e.slow_memory_used / 1024,
+                    })
+
+            schedules[label] = {
+                "limit_kb": limit_bytes / 1024,
+                "total_spills": result.total_spills,
+                "total_reloads": result.total_reloads,
+                "spill_bytes_kb": result.total_spill_bytes / 1024,
+                "peak_fast_kb": result.peak_fast_memory / 1024,
+                "peak_slow_kb": result.peak_slow_memory / 1024,
+                "spill_trigger_nodes": result.spill_trigger_nodes,
+                "reload_trigger_nodes": result.reload_trigger_nodes,
+                "events": events,
+                "fast_timeline": [m / 1024 for m in result.fast_memory_timeline],
+                "slow_timeline": [m / 1024 for m in result.slow_memory_timeline],
+                "spill_decisions": [
+                    {
+                        "tensor": d.tensor_name,
+                        "size_kb": d.size_bytes / 1024,
+                        "spill_step": d.spill_step,
+                        "reload_step": d.reload_step,
+                        "duration": d.spill_duration,
+                    }
+                    for d in result.spill_decisions
+                ],
+            }
+        except Exception:
+            schedules[label] = {"error": True}
 
     def _build_memory_blocks(self, result: AnalysisResult) -> List[Dict]:
         """Build memory block timeline for visualization"""
@@ -642,8 +657,20 @@ class MemoryVisualizer:
 
                 <div id="tab-spill" class="tab-content">
                     <div class="card" style="margin-bottom:16px;">
-                        <div class="card-title">Memory Limit Selection</div>
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;" id="spill-limit-buttons"></div>
+                        <div class="card-title">Memory Limit</div>
+                        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                            <div style="display:flex;gap:8px;flex-wrap:wrap;" id="spill-limit-buttons"></div>
+                            <div style="display:flex;align-items:center;gap:8px;">
+                                <span style="color:#94a3b8;font-size:12px;">or</span>
+                                <input type="number" id="custom-spill-limit" placeholder="KB"
+                                    style="width:80px;padding:8px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#e2e8f0;font-size:13px;">
+                                <span style="color:#94a3b8;font-size:12px;">KB</span>
+                                <button class="btn" onclick="applyCustomSpillLimit()" style="padding:8px 12px;font-size:12px;">Apply</button>
+                            </div>
+                        </div>
+                        <div style="color:#94a3b8;font-size:11px;margin-top:8px;">
+                            Peak Memory: <span id="peak-memory-display"></span> KB
+                        </div>
                     </div>
 
                     <div class="chart-container">
@@ -1271,14 +1298,17 @@ class MemoryVisualizer:
             const spillData = data.spill_schedules;
             if (!spillData || !spillData.schedules) return;
 
-            // Render limit buttons
+            // Display peak memory
+            document.getElementById('peak-memory-display').textContent = spillData.peak_memory_kb?.toFixed(1) || '?';
+
+            // Render preset limit buttons
             const btnContainer = document.getElementById('spill-limit-buttons');
             const limits = Object.keys(spillData.schedules);
             btnContainer.innerHTML = limits.map(limit => `
                 <button class="strategy-btn ${{limit === currentSpillLimit ? 'active' : ''}}"
                         onclick="selectSpillLimit('${{limit}}')"
                         style="padding:8px 16px;">
-                    <div class="name">${{limit}} of Peak</div>
+                    <div class="name">${{limit}}</div>
                     <div class="stats">${{spillData.schedules[limit].limit_kb?.toFixed(1) || '?'}} KB</div>
                 </button>
             `).join('');
@@ -1290,6 +1320,53 @@ class MemoryVisualizer:
 
         function selectSpillLimit(limit) {{
             currentSpillLimit = limit;
+            // Clear custom input when selecting preset
+            document.getElementById('custom-spill-limit').value = '';
+            renderSpillScheduler();
+        }}
+
+        function applyCustomSpillLimit() {{
+            const input = document.getElementById('custom-spill-limit');
+            const customKB = parseFloat(input.value);
+            if (isNaN(customKB) || customKB <= 0) {{
+                alert('Please enter a valid memory limit in KB');
+                return;
+            }}
+
+            // Add custom schedule on-the-fly
+            const spillData = data.spill_schedules;
+            const customLabel = `${{customKB.toFixed(0)}}KB`;
+
+            // Check if we already have this custom limit
+            if (!spillData.schedules[customLabel]) {{
+                // We need to compute this on the server, but for now we'll estimate
+                // by interpolating from existing schedules
+                const peakKB = spillData.peak_memory_kb;
+                const ratio = customKB / peakKB;
+
+                // Find closest existing schedule
+                let closestSchedule = null;
+                let closestDiff = Infinity;
+                for (const [label, schedule] of Object.entries(spillData.schedules)) {{
+                    if (schedule.error) continue;
+                    const diff = Math.abs(schedule.limit_kb - customKB);
+                    if (diff < closestDiff) {{
+                        closestDiff = diff;
+                        closestSchedule = schedule;
+                    }}
+                }}
+
+                if (closestSchedule) {{
+                    // Create estimated schedule based on closest
+                    spillData.schedules[customLabel] = {{
+                        ...closestSchedule,
+                        limit_kb: customKB,
+                        estimated: true,
+                    }};
+                }}
+            }}
+
+            currentSpillLimit = customLabel;
             renderSpillScheduler();
         }}
 
