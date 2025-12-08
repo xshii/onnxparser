@@ -49,6 +49,10 @@ models/*.html
 models/examples/
 models/onnx/
 
+# Generated examples output
+examples/*.html
+examples/*.xlsx
+
 # OS
 .DS_Store
 Thumbs.db
