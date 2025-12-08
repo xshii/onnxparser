@@ -110,6 +110,10 @@ class GraphBuilder:
         dtype: torch.dtype = torch.float32,
     ) -> Tensor:
         """Wrap as Tensor"""
+        # Store shape/dtype in node meta for memory analysis
+        if shape:
+            node.meta["shape"] = shape
+        node.meta["dtype"] = dtype
         tensor = Tensor(node, self, shape, dtype)
         self._tensors[node.name] = tensor
         return tensor
