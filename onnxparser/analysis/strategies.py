@@ -2,9 +2,11 @@
 """Memory allocation strategies - all strategies support memory constraints"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Type, Tuple
-import torch
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Type, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .memory_analyzer import TensorInfo, MemoryConstraint
 
 
 class MemoryExceededError(Exception):
@@ -595,3 +597,165 @@ class FirstFitStrategy(AllocationStrategy):
 
     def current_memory(self) -> int:
         return sum(b.size for b in self._memory_pool if not b.is_free)
+
+
+@StrategyRegistry.register("static")
+class StaticAllocationStrategy(AllocationStrategy):
+    """
+    Static memory allocation - pre-computes fixed offsets at compile time.
+    No runtime memory pool management, each tensor gets a fixed address.
+
+    Uses interval coloring algorithm to minimize total memory while
+    ensuring non-overlapping lifetimes share the same memory region.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Pre-computed static offsets: tensor_name -> (offset, size)
+        self._static_offsets: Dict[str, Tuple[int, int]] = {}
+        self._total_memory = 0
+        self._active_memory = 0
+        self._active_tensors: set = set()
+
+    @property
+    def name(self) -> str:
+        return "static"
+
+    def reset(self) -> None:
+        super().reset()
+        self._static_offsets = {}
+        self._total_memory = 0
+        self._active_memory = 0
+        self._active_tensors = set()
+
+    def precompute_offsets(
+        self,
+        tensors: List['TensorInfo'],
+        alignment: int = 64,
+    ) -> Dict[str, int]:
+        """
+        Pre-compute static memory offsets for all tensors.
+        Uses interval graph coloring to find optimal placement.
+
+        Returns: Dict mapping tensor_name -> fixed_offset
+        """
+        if not tensors:
+            return {}
+
+        # Sort by birth_step for deterministic ordering
+        sorted_tensors = sorted(tensors, key=lambda t: (t.birth_step, -t.size_bytes))
+
+        # Track allocated regions: list of (offset, end_offset, death_step)
+        allocated_regions: List[Tuple[int, int, int]] = []
+
+        for tensor in sorted_tensors:
+            size = self._align(tensor.size_bytes, alignment)
+            birth = tensor.birth_step
+            death = tensor.death_step
+
+            # Find a gap where this tensor can fit
+            # Remove expired regions first
+            allocated_regions = [
+                (off, end, d) for off, end, d in allocated_regions
+                if d >= birth  # Keep regions that are still alive
+            ]
+
+            # Sort by offset to find gaps
+            allocated_regions.sort(key=lambda r: r[0])
+
+            # Find first gap that fits
+            best_offset = None
+            current_pos = 0
+
+            for region_offset, region_end, _ in allocated_regions:
+                if current_pos + size <= region_offset:
+                    # Found a gap
+                    best_offset = current_pos
+                    break
+                current_pos = max(current_pos, region_end)
+
+            if best_offset is None:
+                # No gap found, allocate at the end
+                best_offset = current_pos
+
+            # Record this allocation
+            self._static_offsets[tensor.name] = (best_offset, size)
+            allocated_regions.append((best_offset, best_offset + size, death))
+            self._total_memory = max(self._total_memory, best_offset + size)
+
+        return {name: offset for name, (offset, _) in self._static_offsets.items()}
+
+    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
+        self.set_memory_limit(constraint.max_memory_bytes)
+        size = self._align(tensor.size_bytes, constraint.alignment)
+
+        # Check if we have pre-computed offset
+        if tensor.name in self._static_offsets:
+            offset, _ = self._static_offsets[tensor.name]
+        else:
+            # Fallback: allocate at next available position
+            offset = self._total_memory
+            self._static_offsets[tensor.name] = (offset, size)
+            self._total_memory += size
+
+        # Check memory limit
+        exceeded, available = self.check_memory_limit(size)
+        if exceeded:
+            self.record_exceeded(size - available)
+
+        self._active_tensors.add(tensor.name)
+        self._active_memory += size
+
+        return AllocationResult(
+            tensor_name=tensor.name,
+            offset=offset,
+            size=size,
+            reused_from=None,  # Static allocation, no runtime reuse concept
+            exceeded_limit=exceeded,
+        )
+
+    def deallocate(self, tensor_name: str) -> None:
+        if tensor_name in self._active_tensors:
+            self._active_tensors.remove(tensor_name)
+            if tensor_name in self._static_offsets:
+                _, size = self._static_offsets[tensor_name]
+                self._active_memory -= size
+
+    def current_memory(self) -> int:
+        return self._active_memory
+
+    def get_memory_layout(self) -> Dict[str, Dict]:
+        """
+        Get the complete static memory layout.
+        Returns dict with tensor_name -> {offset, size} for code generation.
+        """
+        return {
+            name: {"offset": offset, "size": size}
+            for name, (offset, size) in self._static_offsets.items()
+        }
+
+    def total_static_memory(self) -> int:
+        """Get total static memory required"""
+        return self._total_memory
+
+    def generate_memory_map(self) -> str:
+        """
+        Generate C-style memory map for static allocation.
+        Useful for embedded systems or hardware code generation.
+        """
+        lines = [
+            "// Static Memory Layout",
+            f"// Total Memory Required: {self._total_memory} bytes",
+            "",
+            "#define MEMORY_POOL_SIZE {}".format(self._total_memory),
+            "",
+            "// Tensor Offsets",
+        ]
+
+        for name, (offset, size) in sorted(
+            self._static_offsets.items(), key=lambda x: x[1][0]
+        ):
+            safe_name = name.upper().replace(".", "_").replace("-", "_")
+            lines.append(f"#define OFFSET_{safe_name} {offset}  // size: {size}")
+
+        return "\n".join(lines)

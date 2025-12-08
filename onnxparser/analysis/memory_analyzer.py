@@ -2,7 +2,7 @@
 """Memory analysis for FX GraphModule"""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Dict, List, Optional, Any
 import torch
 import torch.fx as fx
 from functools import reduce
@@ -360,6 +360,13 @@ class MemoryAnalyzer:
 
         # Initialize strategy
         self.strategy.reset()
+
+        # For static strategy, pre-compute offsets with full lifetime info
+        if self.strategy_name == "static":
+            from .strategies import StaticAllocationStrategy
+            if isinstance(self.strategy, StaticAllocationStrategy):
+                non_weight_tensors = [t for t in tensors.values() if not t.is_weight]
+                self.strategy.precompute_offsets(non_weight_tensors, self.constraint.alignment)
 
         for step, node in enumerate(self.gm.graph.nodes):
             if node.op == "output":

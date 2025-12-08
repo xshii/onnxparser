@@ -1,0 +1,570 @@
+{
+  "summary": {
+    "total_spills": 9,
+    "total_reloads": 3,
+    "total_spill_mb": 0.557056,
+    "peak_fast_memory_mb": 0.131072,
+    "peak_slow_memory_mb": 0.065536
+  },
+  "spill_trigger_nodes": [
+    "matmul_2",
+    "transpose",
+    "matmul_3",
+    "softmax",
+    "matmul_4",
+    "matmul_5",
+    "gelu",
+    "matmul_6"
+  ],
+  "reload_trigger_nodes": [
+    "matmul_3",
+    "matmul_4",
+    "add_1"
+  ],
+  "spill_decisions": [
+    {
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "spill_step": 6,
+      "reload_step": 8,
+      "duration": 2
+    },
+    {
+      "tensor": "matmul_2",
+      "size_mb": 0.032768,
+      "spill_step": 7,
+      "reload_step": 10,
+      "duration": 3
+    },
+    {
+      "tensor": "transpose",
+      "size_mb": 0.032768,
+      "spill_step": 8,
+      "reload_step": 8,
+      "duration": 0
+    },
+    {
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "spill_step": 8,
+      "reload_step": 8,
+      "duration": 0
+    },
+    {
+      "tensor": "matmul_3",
+      "size_mb": 0.065536,
+      "spill_step": 9,
+      "reload_step": 9,
+      "duration": 0
+    },
+    {
+      "tensor": "layernorm",
+      "size_mb": 0.032768,
+      "spill_step": 17,
+      "reload_step": 17,
+      "duration": 0
+    },
+    {
+      "tensor": "matmul_5",
+      "size_mb": 0.131072,
+      "spill_step": 18,
+      "reload_step": 18,
+      "duration": 0
+    },
+    {
+      "tensor": "gelu",
+      "size_mb": 0.131072,
+      "spill_step": 19,
+      "reload_step": 19,
+      "duration": 0
+    }
+  ],
+  "events": [
+    {
+      "step": 0,
+      "type": "allocate",
+      "tensor": "input_1",
+      "size_mb": 0.032768,
+      "node": "input_1",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 0,
+      "type": "compute",
+      "tensor": "input_1",
+      "size_mb": 0.0,
+      "node": "input_1",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 1,
+      "type": "compute",
+      "tensor": "q_weight",
+      "size_mb": 0.0,
+      "node": "q_weight",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 2,
+      "type": "compute",
+      "tensor": "k_weight",
+      "size_mb": 0.0,
+      "node": "k_weight",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 3,
+      "type": "compute",
+      "tensor": "v_weight",
+      "size_mb": 0.0,
+      "node": "v_weight",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 4,
+      "type": "allocate",
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "node": "matmul",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 4,
+      "type": "compute",
+      "tensor": "matmul",
+      "size_mb": 0.0,
+      "node": "matmul",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 5,
+      "type": "allocate",
+      "tensor": "matmul_1",
+      "size_mb": 0.032768,
+      "node": "matmul_1",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 5,
+      "type": "compute",
+      "tensor": "matmul_1",
+      "size_mb": 0.0,
+      "node": "matmul_1",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 6,
+      "type": "spill",
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "node": "matmul_2",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 6,
+      "type": "allocate",
+      "tensor": "matmul_2",
+      "size_mb": 0.032768,
+      "node": "matmul_2",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 6,
+      "type": "compute",
+      "tensor": "matmul_2",
+      "size_mb": 0.0,
+      "node": "matmul_2",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 7,
+      "type": "spill",
+      "tensor": "matmul_2",
+      "size_mb": 0.032768,
+      "node": "transpose",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 7,
+      "type": "allocate",
+      "tensor": "transpose",
+      "size_mb": 0.032768,
+      "node": "transpose",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 7,
+      "type": "compute",
+      "tensor": "transpose",
+      "size_mb": 0.0,
+      "node": "transpose",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 7,
+      "type": "deallocate",
+      "tensor": "matmul_1",
+      "size_mb": 0.032768,
+      "node": "transpose",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 8,
+      "type": "reload",
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "node": "matmul_3",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 8,
+      "type": "spill",
+      "tensor": "transpose",
+      "size_mb": 0.032768,
+      "node": "matmul_3",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 8,
+      "type": "spill",
+      "tensor": "matmul",
+      "size_mb": 0.032768,
+      "node": "matmul_3",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 8,
+      "type": "allocate",
+      "tensor": "matmul_3",
+      "size_mb": 0.065536,
+      "node": "matmul_3",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 8,
+      "type": "compute",
+      "tensor": "matmul_3",
+      "size_mb": 0.0,
+      "node": "matmul_3",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 9,
+      "type": "spill",
+      "tensor": "matmul_3",
+      "size_mb": 0.065536,
+      "node": "softmax",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 9,
+      "type": "allocate",
+      "tensor": "softmax",
+      "size_mb": 0.065536,
+      "node": "softmax",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 9,
+      "type": "compute",
+      "tensor": "softmax",
+      "size_mb": 0.0,
+      "node": "softmax",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 10,
+      "type": "spill",
+      "tensor": "softmax",
+      "size_mb": 0.065536,
+      "node": "matmul_4",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.098304
+    },
+    {
+      "step": 10,
+      "type": "reload",
+      "tensor": "matmul_2",
+      "size_mb": 0.032768,
+      "node": "matmul_4",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 10,
+      "type": "allocate",
+      "tensor": "matmul_4",
+      "size_mb": 0.032768,
+      "node": "matmul_4",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 10,
+      "type": "compute",
+      "tensor": "matmul_4",
+      "size_mb": 0.0,
+      "node": "matmul_4",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 10,
+      "type": "deallocate",
+      "tensor": "matmul_2",
+      "size_mb": 0.032768,
+      "node": "matmul_4",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.065536
+    },
+    {
+      "step": 11,
+      "type": "allocate",
+      "tensor": "add",
+      "size_mb": 0.032768,
+      "node": "add",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 11,
+      "type": "compute",
+      "tensor": "add",
+      "size_mb": 0.0,
+      "node": "add",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 11,
+      "type": "deallocate",
+      "tensor": "input_1",
+      "size_mb": 0.032768,
+      "node": "add",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 11,
+      "type": "deallocate",
+      "tensor": "matmul_4",
+      "size_mb": 0.032768,
+      "node": "add",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 12,
+      "type": "compute",
+      "tensor": "ln_weight",
+      "size_mb": 0.0,
+      "node": "ln_weight",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 13,
+      "type": "compute",
+      "tensor": "ln_bias",
+      "size_mb": 0.0,
+      "node": "ln_bias",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 14,
+      "type": "allocate",
+      "tensor": "layernorm",
+      "size_mb": 0.032768,
+      "node": "layernorm",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 14,
+      "type": "compute",
+      "tensor": "layernorm",
+      "size_mb": 0.0,
+      "node": "layernorm",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 14,
+      "type": "deallocate",
+      "tensor": "add",
+      "size_mb": 0.032768,
+      "node": "layernorm",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 15,
+      "type": "compute",
+      "tensor": "ffn_w1",
+      "size_mb": 0.0,
+      "node": "ffn_w1",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 16,
+      "type": "compute",
+      "tensor": "ffn_w2",
+      "size_mb": 0.0,
+      "node": "ffn_w2",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 17,
+      "type": "spill",
+      "tensor": "layernorm",
+      "size_mb": 0.032768,
+      "node": "matmul_5",
+      "fast_mb": 0.0,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 17,
+      "type": "allocate",
+      "tensor": "matmul_5",
+      "size_mb": 0.131072,
+      "node": "matmul_5",
+      "fast_mb": 0.131072,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 17,
+      "type": "compute",
+      "tensor": "matmul_5",
+      "size_mb": 0.0,
+      "node": "matmul_5",
+      "fast_mb": 0.131072,
+      "slow_mb": 0.032768
+    },
+    {
+      "step": 18,
+      "type": "spill",
+      "tensor": "matmul_5",
+      "size_mb": 0.131072,
+      "node": "gelu",
+      "fast_mb": 0.0,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 18,
+      "type": "allocate",
+      "tensor": "gelu",
+      "size_mb": 0.131072,
+      "node": "gelu",
+      "fast_mb": 0.131072,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 18,
+      "type": "compute",
+      "tensor": "gelu",
+      "size_mb": 0.0,
+      "node": "gelu",
+      "fast_mb": 0.131072,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 19,
+      "type": "spill",
+      "tensor": "gelu",
+      "size_mb": 0.131072,
+      "node": "matmul_6",
+      "fast_mb": 0.0,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 19,
+      "type": "allocate",
+      "tensor": "matmul_6",
+      "size_mb": 0.032768,
+      "node": "matmul_6",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 19,
+      "type": "compute",
+      "tensor": "matmul_6",
+      "size_mb": 0.0,
+      "node": "matmul_6",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.16384
+    },
+    {
+      "step": 20,
+      "type": "reload",
+      "tensor": "layernorm",
+      "size_mb": 0.032768,
+      "node": "add_1",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 20,
+      "type": "allocate",
+      "tensor": "add_1",
+      "size_mb": 0.032768,
+      "node": "add_1",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 20,
+      "type": "compute",
+      "tensor": "add_1",
+      "size_mb": 0.0,
+      "node": "add_1",
+      "fast_mb": 0.098304,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 20,
+      "type": "deallocate",
+      "tensor": "matmul_6",
+      "size_mb": 0.032768,
+      "node": "add_1",
+      "fast_mb": 0.065536,
+      "slow_mb": 0.0
+    },
+    {
+      "step": 20,
+      "type": "deallocate",
+      "tensor": "layernorm",
+      "size_mb": 0.032768,
+      "node": "add_1",
+      "fast_mb": 0.032768,
+      "slow_mb": 0.0
+    }
+  ]
+}

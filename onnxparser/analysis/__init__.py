@@ -18,7 +18,17 @@ from .strategies import (
     InplaceStrategy,
     BestFitStrategy,
     FirstFitStrategy,
+    StaticAllocationStrategy,
     StrategyRegistry,
+)
+from .spill_scheduler import (
+    SpillScheduler,
+    SpillStrategy,
+    SpillDecision,
+    ScheduleResult,
+    MemoryEvent,
+    MemoryEventType,
+    schedule_spills,
 )
 
 __all__ = [
@@ -39,5 +49,14 @@ __all__ = [
     "InplaceStrategy",
     "BestFitStrategy",
     "FirstFitStrategy",
+    "StaticAllocationStrategy",
     "StrategyRegistry",
+    # Spill Scheduler
+    "SpillScheduler",
+    "SpillStrategy",
+    "SpillDecision",
+    "ScheduleResult",
+    "MemoryEvent",
+    "MemoryEventType",
+    "schedule_spills",
 ]
