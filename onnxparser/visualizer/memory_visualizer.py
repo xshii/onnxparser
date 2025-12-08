@@ -1832,3 +1832,57 @@ def serve_memory(
     """Convenience function to serve memory visualization"""
     viz = MemoryVisualizer(gm, dynamic_shapes)
     viz.serve(port=port)
+
+
+def main():
+    """Test memory visualizer with a demo model"""
+    import argparse
+    import torch
+    import torch.nn as nn
+
+    parser = argparse.ArgumentParser(description="Memory Visualizer Demo")
+    parser.add_argument("--port", type=int, default=8080, help="Server port")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
+    parser.add_argument("--save", type=str, default=None, help="Save HTML to file")
+    args = parser.parse_args()
+
+    print("Building demo model for memory analysis...")
+
+    # Build a more complex model to show memory analysis
+    class DemoModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear1 = nn.Linear(64, 256)
+            self.linear2 = nn.Linear(256, 512)
+            self.linear3 = nn.Linear(512, 256)
+            self.linear4 = nn.Linear(256, 64)
+            self.relu = nn.ReLU()
+
+        def forward(self, x):
+            x = self.linear1(x)
+            x = self.relu(x)
+            x = self.linear2(x)
+            x = self.relu(x)
+            x = self.linear3(x)
+            x = self.relu(x)
+            x = self.linear4(x)
+            return x
+
+    model = DemoModel()
+    gm = fx.symbolic_trace(model)
+
+    print(f"Model traced: {len(list(gm.graph.nodes))} nodes")
+
+    viz = MemoryVisualizer(gm)
+
+    if args.save:
+        viz.save(args.save)
+        print(f"Saved to: {args.save}")
+    else:
+        print(f"\nStarting memory visualizer on port {args.port}...")
+        print(f"Open http://localhost:{args.port} in your browser\n")
+        viz.serve(port=args.port, open_browser=not args.no_browser)
+
+
+if __name__ == "__main__":
+    main()

@@ -1350,3 +1350,71 @@ def serve(gm: fx.GraphModule, port: int = 8080,
           input_data: Optional[Dict[str, torch.Tensor]] = None) -> None:
     viz = GraphVisualizer(gm, input_data)
     viz.serve(port=port)
+
+
+def main():
+    """Test graph visualizer with a demo model"""
+    import argparse
+    import torch.nn as nn
+
+    parser = argparse.ArgumentParser(description="Graph Visualizer Demo")
+    parser.add_argument("--port", type=int, default=8080, help="Server port")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
+    parser.add_argument("--save", type=str, default=None, help="Save HTML to file")
+    parser.add_argument("--with-data", action="store_true", help="Run with input data for tensor analysis")
+    args = parser.parse_args()
+
+    print("Building demo transformer model...")
+
+    # Build a simple transformer-like model
+    class DemoTransformer(nn.Module):
+        def __init__(self, dim=64):
+            super().__init__()
+            self.query = nn.Linear(dim, dim)
+            self.key = nn.Linear(dim, dim)
+            self.value = nn.Linear(dim, dim)
+            self.ffn1 = nn.Linear(dim, dim * 4)
+            self.ffn2 = nn.Linear(dim * 4, dim)
+            self.ln1 = nn.LayerNorm(dim)
+            self.ln2 = nn.LayerNorm(dim)
+
+        def forward(self, x):
+            # Self-attention
+            q = self.query(x)
+            k = self.key(x)
+            v = self.value(x)
+            scores = torch.matmul(q, k.transpose(-2, -1)) / 8.0
+            attn = torch.softmax(scores, dim=-1)
+            attn_out = torch.matmul(attn, v)
+            x = self.ln1(x + attn_out)
+
+            # FFN
+            ffn = self.ffn1(x)
+            ffn = torch.relu(ffn)
+            ffn = self.ffn2(ffn)
+            x = self.ln2(x + ffn)
+            return x
+
+    model = DemoTransformer()
+    gm = fx.symbolic_trace(model)
+
+    print(f"Model traced: {len(list(gm.graph.nodes))} nodes")
+
+    input_data = None
+    if args.with_data:
+        input_data = {"x": torch.randn(2, 8, 64)}
+        print("Running with input data for tensor analysis...")
+
+    viz = GraphVisualizer(gm, input_data)
+
+    if args.save:
+        viz.save(args.save)
+        print(f"Saved to: {args.save}")
+    else:
+        print(f"\nStarting graph visualizer on port {args.port}...")
+        print(f"Open http://localhost:{args.port} in your browser\n")
+        viz.serve(port=args.port, open_browser=not args.no_browser)
+
+
+if __name__ == "__main__":
+    main()

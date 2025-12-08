@@ -101,3 +101,65 @@ _manager = ModelManager()
 def get_manager() -> ModelManager:
     """Get the global model manager instance"""
     return _manager
+
+
+def main():
+    """Test model manager with a demo model"""
+    import torch.nn as nn
+
+    print("Testing ModelManager...")
+    print("-" * 50)
+
+    # Build a simple test model
+    class SimpleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear1 = nn.Linear(64, 128)
+            self.relu = nn.ReLU()
+            self.linear2 = nn.Linear(128, 64)
+
+        def forward(self, x):
+            x = self.linear1(x)
+            x = self.relu(x)
+            x = self.linear2(x)
+            return x
+
+    model = SimpleModel()
+    gm = fx.symbolic_trace(model)
+
+    # Test manager
+    manager = ModelManager()
+
+    # Add model
+    input_data = {"x": torch.randn(2, 64)}
+    manager.add_model("test_model", gm, input_data)
+    print(f"Added model: test_model")
+    print(f"Loaded models: {manager.list_models()}")
+
+    # Get graph data
+    graph_data = manager.get_graph_data("test_model", 800, 600)
+    if graph_data:
+        print(f"\nGraph data:")
+        print(f"  Nodes: {len(graph_data['nodes'])}")
+        print(f"  Edges: {len(graph_data['edges'])}")
+        for node in graph_data["nodes"][:5]:
+            print(f"    - {node['name']} ({node['type']})")
+
+    # Get memory data
+    memory_data = manager.get_memory_data("test_model")
+    if memory_data and "error" not in memory_data:
+        print(f"\nMemory data:")
+        print(f"  Tensors: {len(memory_data.get('tensors', []))}")
+        print(f"  Peak memory: {memory_data.get('summary', {}).get('peak_max_kb', 'N/A')} KB")
+    elif memory_data and "error" in memory_data:
+        print(f"\nMemory analysis not available: {memory_data['error']}")
+
+    # Remove model
+    manager.remove_model("test_model")
+    print(f"\nAfter removal: {manager.list_models()}")
+
+    print("\nModelManager test completed!")
+
+
+if __name__ == "__main__":
+    main()

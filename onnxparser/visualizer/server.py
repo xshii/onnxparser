@@ -205,3 +205,80 @@ def serve_dynamic(models: Optional[Dict[str, fx.GraphModule]] = None,
 
     server.start(open_browser=open_browser, debug=debug)
     return server
+
+
+def _build_demo_model():
+    """Build a demo transformer model for testing"""
+    from ..builder import GraphBuilder
+
+    print("Building demo transformer model...")
+    builder = GraphBuilder()
+
+    # Simple transformer block
+    x = builder.placeholder("input", shape=(2, 8, 64))
+
+    # Attention
+    q = builder.linear(x, 64, name="query")
+    k = builder.linear(x, 64, name="key")
+    v = builder.linear(x, 64, name="value")
+
+    scores = builder.matmul(q, builder.transpose(k, -2, -1))
+    scores = builder.div(scores, 8.0)
+    attn = builder.softmax(scores, dim=-1)
+    attn_out = builder.matmul(attn, v)
+
+    # FFN
+    ffn = builder.linear(attn_out, 256, name="ffn1")
+    ffn = builder.relu(ffn)
+    ffn = builder.linear(ffn, 64, name="ffn2")
+
+    out = builder.add(x, ffn)
+    out = builder.layer_norm(out, [64], name="ln")
+
+    builder.output(out)
+    return builder.build()
+
+
+def main():
+    """Main entry point for standalone server execution"""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="ONNX Parser Visualization Server",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Start server with demo model
+  python -m onnxparser.visualizer.server
+
+  # Specify port
+  python -m onnxparser.visualizer.server --port 8888
+
+  # Don't open browser
+  python -m onnxparser.visualizer.server --no-browser
+"""
+    )
+    parser.add_argument("--port", type=int, default=8080, help="Server port (default: 8080)")
+    parser.add_argument("--no-browser", action="store_true", help="Don't open browser")
+    parser.add_argument("--debug", action="store_true", help="Enable Flask debug mode")
+
+    args = parser.parse_args()
+
+    # Build demo model
+    gm = _build_demo_model()
+    input_data = {"input": torch.randn(2, 8, 64)}
+
+    print(f"\nStarting visualization server on port {args.port}...")
+    print(f"Open http://localhost:{args.port} in your browser\n")
+
+    serve_dynamic(
+        models={"DEMO": gm},
+        input_data={"DEMO": input_data},
+        port=args.port,
+        open_browser=not args.no_browser,
+        debug=args.debug,
+    )
+
+
+if __name__ == "__main__":
+    main()

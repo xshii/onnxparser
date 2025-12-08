@@ -67,3 +67,67 @@ class MemoryAnalyzerWrapper:
             return StrategyRegistry.list_strategies()
         except ImportError:
             return ["greedy"]
+
+
+def main():
+    """Test memory analyzer wrapper with a demo model"""
+    import torch
+    import torch.nn as nn
+
+    print("Testing MemoryAnalyzerWrapper...")
+    print("-" * 50)
+
+    # Build a simple test model
+    class SimpleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear1 = nn.Linear(64, 128)
+            self.relu = nn.ReLU()
+            self.linear2 = nn.Linear(128, 256)
+            self.linear3 = nn.Linear(256, 64)
+
+        def forward(self, x):
+            x = self.linear1(x)
+            x = self.relu(x)
+            x = self.linear2(x)
+            x = self.relu(x)
+            x = self.linear3(x)
+            return x
+
+    model = SimpleModel()
+    gm = fx.symbolic_trace(model)
+
+    print(f"Model: {model.__class__.__name__}")
+    print(f"Available strategies: {MemoryAnalyzerWrapper.list_strategies()}")
+
+    # Analyze with each strategy
+    for strategy in MemoryAnalyzerWrapper.list_strategies():
+        print(f"\n--- Strategy: {strategy} ---")
+        result = MemoryAnalyzerWrapper.analyze(gm, strategy)
+
+        if "error" in result:
+            print(f"  Error: {result['error']}")
+            continue
+
+        print(f"  Tensors: {len(result.get('tensors', []))}")
+        print(f"  Timeline steps: {len(result.get('timeline', []))}")
+
+        summary = result.get("summary", {})
+        print(f"  Peak memory (max): {summary.get('peak_max_kb', 'N/A'):.2f} KB")
+        print(f"  Peak memory (min): {summary.get('peak_min_kb', 'N/A'):.2f} KB")
+        print(f"  Savings: {summary.get('savings_pct', 0):.1f}%")
+
+        # Show tensor details
+        tensors = result.get("tensors", [])[:5]
+        if tensors:
+            print("\n  Sample tensors:")
+            for t in tensors:
+                reused = f" (reused from {t['reused_from']})" if t.get('reused_from') else ""
+                print(f"    - {t['name']}: {t['shape']} {t['dtype']}, "
+                      f"birth={t['birth']}, death={t['death']}{reused}")
+
+    print("\nMemoryAnalyzerWrapper test completed!")
+
+
+if __name__ == "__main__":
+    main()

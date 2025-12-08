@@ -502,3 +502,56 @@ class GraphExtractor:
             "edges": edges,
             "has_data": len(self.execution_trace) > 0
         }
+
+
+def main():
+    """Test extractor with a demo model"""
+    import json
+    import argparse
+    import torch.nn as nn
+    import torch.fx as fx
+
+    parser = argparse.ArgumentParser(description="Test GraphExtractor")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    args = parser.parse_args()
+
+    # Build a simple model
+    print("Building test model...")
+
+    class SimpleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = nn.Linear(8, 16)
+            self.relu = nn.ReLU()
+
+        def forward(self, x):
+            x = self.fc(x)
+            x = self.relu(x)
+            return x
+
+    model = SimpleModel()
+    gm = fx.symbolic_trace(model)
+
+    # Create input data
+    input_data = {"x": torch.randn(2, 4, 8)}
+
+    # Extract graph
+    print("Extracting graph with tensor data...")
+    extractor = GraphExtractor(gm, input_data)
+    data = extractor.extract()
+
+    if args.json:
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"\nNodes: {len(data['nodes'])}")
+        print(f"Edges: {len(data['edges'])}")
+        print(f"Has data: {data['has_data']}")
+
+        print("\nNodes with insights:")
+        for node in data['nodes']:
+            if 'insights' in node and node['insights']:
+                print(f"  {node['name']}: {[i['title'] for i in node['insights']]}")
+
+
+if __name__ == "__main__":
+    main()

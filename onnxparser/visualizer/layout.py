@@ -95,3 +95,44 @@ class GraphLayoutEngine:
             n["is_weight"] = True
 
         return nodes
+
+
+def main():
+    """Test layout engine with sample data"""
+    import json
+
+    # Sample nodes and edges
+    nodes = [
+        {"id": "input", "name": "input", "type": "input"},
+        {"id": "weight1", "name": "weight1", "type": "weight"},
+        {"id": "linear1", "name": "linear1", "type": "matmul"},
+        {"id": "relu", "name": "relu", "type": "activation"},
+        {"id": "weight2", "name": "weight2", "type": "weight"},
+        {"id": "linear2", "name": "linear2", "type": "matmul"},
+        {"id": "output", "name": "output", "type": "output"},
+    ]
+
+    edges = [
+        {"source": "input", "target": "linear1"},
+        {"source": "weight1", "target": "linear1"},
+        {"source": "linear1", "target": "relu"},
+        {"source": "relu", "target": "linear2"},
+        {"source": "weight2", "target": "linear2"},
+        {"source": "linear2", "target": "output"},
+    ]
+
+    engine = GraphLayoutEngine()
+    laid_out = engine.compute_layout(nodes, edges, 1200, 800)
+
+    print("Layout computation result:")
+    print("-" * 50)
+    for node in laid_out:
+        print(f"{node['name']:12} -> x={node.get('x', 'N/A'):4}, y={node.get('y', 'N/A'):4}, "
+              f"w={node.get('width', 'N/A')}, h={node.get('height', 'N/A')}")
+
+    print("\nJSON output:")
+    print(json.dumps(laid_out, indent=2))
+
+
+if __name__ == "__main__":
+    main()
