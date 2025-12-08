@@ -76,6 +76,9 @@ class StepMemoryInfo:
     freed_tensors: List[str] = field(default_factory=list)
     reused_from: Optional[str] = None
 
+    # Memory constraint tracking
+    exceeded_limit: bool = False
+
 
 @dataclass
 class AnalysisResult:
@@ -99,12 +102,31 @@ class AnalysisResult:
     # Strategy used
     strategy_name: str = ""
 
+    # Memory constraint info
+    memory_limit: Optional[int] = None
+    exceeded_count: int = 0
+    total_exceeded_bytes: int = 0
+
     # Memory savings
     @property
     def savings_ratio(self) -> float:
         if self.peak_max_memory == 0:
             return 0.0
         return 1.0 - (self.peak_min_memory / self.peak_max_memory)
+
+    @property
+    def fits_in_limit(self) -> bool:
+        """Check if the model fits within memory limit"""
+        if self.memory_limit is None:
+            return True
+        return self.peak_min_memory <= self.memory_limit
+
+    @property
+    def overflow_bytes(self) -> int:
+        """Bytes over the memory limit (0 if fits)"""
+        if self.memory_limit is None:
+            return 0
+        return max(0, self.peak_min_memory - self.memory_limit)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON export"""
@@ -115,6 +137,10 @@ class AnalysisResult:
                 "static_memory_mb": self.static_memory / 1e6,
                 "savings_percent": self.savings_ratio * 100,
                 "strategy": self.strategy_name,
+                "memory_limit_mb": self.memory_limit / 1e6 if self.memory_limit else None,
+                "fits_in_limit": self.fits_in_limit,
+                "overflow_mb": self.overflow_bytes / 1e6,
+                "exceeded_count": self.exceeded_count,
             },
             "steps": [
                 {
@@ -124,6 +150,7 @@ class AnalysisResult:
                     "max_memory_mb": s.max_memory / 1e6,
                     "min_memory_mb": s.min_memory / 1e6,
                     "live_tensors": s.live_tensors,
+                    "exceeded_limit": s.exceeded_limit,
                 }
                 for s in self.steps
             ],
@@ -381,6 +408,7 @@ class MemoryAnalyzer:
                     output_tensor.reused_from = result.reused_from
                     output_tensor.is_inplace = result.is_inplace
                     step_info.reused_from = result.reused_from
+                    step_info.exceeded_limit = result.exceeded_limit
 
                     live_tensors[node.name] = output_tensor
 
@@ -419,6 +447,7 @@ class MemoryAnalyzer:
             steps=steps,
             tensors=tensors,
             strategy_name=self.strategy_name,
+            memory_limit=self.constraint.max_memory_bytes,
         )
 
         # Calculate peaks
@@ -436,6 +465,11 @@ class MemoryAnalyzer:
             if tensor.is_weight:
                 result.static_memory += tensor.size_bytes
                 result.weight_count += 1
+
+        # Get exceeded stats from strategy
+        exceeded_stats = self.strategy.exceeded_stats
+        result.exceeded_count = exceeded_stats["exceeded_count"]
+        result.total_exceeded_bytes = exceeded_stats["total_exceeded_bytes"]
 
         return result
 

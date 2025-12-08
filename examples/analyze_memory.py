@@ -85,6 +85,18 @@ def main():
         print(f"  {name:15s}: Peak={res.peak_min_memory/1e6:8.2f} MB, "
               f"Savings={res.savings_ratio*100:5.1f}%")
 
+    # Test with memory constraint
+    print("\n=== Memory Constraint Test ===")
+    constraint = MemoryConstraint(max_memory_mb=0.02)  # 20KB limit
+    constrained_analyzer = MemoryAnalyzer(gm, strategy="greedy", constraint=constraint)
+    constrained_result = constrained_analyzer.analyze()
+
+    print(f"Memory Limit: {constraint.max_memory_mb:.2f} MB")
+    print(f"Peak Memory: {constrained_result.peak_min_memory / 1e6:.4f} MB")
+    print(f"Fits in Limit: {constrained_result.fits_in_limit}")
+    print(f"Overflow: {constrained_result.overflow_bytes / 1e6:.4f} MB")
+    print(f"Exceeded Count: {constrained_result.exceeded_count}")
+
     # Generate visualization
     print("\nGenerating memory visualization...")
     output_path = "/home/user/onnxparser/examples/memory_analysis.html"

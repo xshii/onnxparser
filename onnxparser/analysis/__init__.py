@@ -10,23 +10,34 @@ from .memory_analyzer import (
 )
 from .strategies import (
     AllocationStrategy,
+    AllocationResult,
+    MemoryBlock,
+    MemoryExceededError,
     NoReuseStrategy,
     GreedyReuseStrategy,
     InplaceStrategy,
-    MemoryBoundedStrategy,
+    BestFitStrategy,
+    FirstFitStrategy,
     StrategyRegistry,
 )
 
 __all__ = [
+    # Analyzer
     "MemoryAnalyzer",
     "MemoryConstraint",
     "TensorInfo",
     "StepMemoryInfo",
     "AnalysisResult",
+    # Strategy base
     "AllocationStrategy",
+    "AllocationResult",
+    "MemoryBlock",
+    "MemoryExceededError",
+    # Strategies
     "NoReuseStrategy",
     "GreedyReuseStrategy",
     "InplaceStrategy",
-    "MemoryBoundedStrategy",
+    "BestFitStrategy",
+    "FirstFitStrategy",
     "StrategyRegistry",
 ]
