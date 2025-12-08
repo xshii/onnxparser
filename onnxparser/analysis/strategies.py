@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Memory allocation strategies - all strategies support memory constraints"""
+"""Memory allocation strategies - all use static pre-computation with different reuse algorithms"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Type, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .memory_analyzer import TensorInfo, MemoryConstraint
+    from .memory_analyzer import TensorInfo
 
 
 class MemoryExceededError(Exception):
@@ -29,28 +29,35 @@ class AllocationResult:
     size: int
     reused_from: Optional[str] = None
     is_inplace: bool = False
-    exceeded_limit: bool = False  # True if allocation exceeded memory limit
+    exceeded_limit: bool = False
 
 
 @dataclass
 class MemoryBlock:
-    """A block in the memory pool"""
+    """A memory block with lifetime info"""
     offset: int
     size: int
-    is_free: bool = True
-    tensor_name: Optional[str] = None
-
-    def can_fit(self, required: int) -> bool:
-        return self.is_free and self.size >= required
+    tensor_name: str
+    birth_step: int
+    death_step: int
 
 
 class AllocationStrategy(ABC):
-    """Base class for memory allocation strategies"""
+    """
+    Base class for static memory allocation strategies.
+    All strategies pre-compute fixed offsets at compile time.
+    """
 
     def __init__(self):
         self._memory_limit: Optional[int] = None
         self._exceeded_count: int = 0
         self._total_exceeded_bytes: int = 0
+        # Static allocation state
+        self._static_offsets: Dict[str, Tuple[int, int]] = {}  # name -> (offset, size)
+        self._reused_from: Dict[str, str] = {}  # name -> reused_from_name
+        self._total_memory = 0
+        self._active_memory = 0
+        self._active_tensors: set = set()
 
     @property
     @abstractmethod
@@ -58,45 +65,25 @@ class AllocationStrategy(ABC):
         """Strategy name"""
         pass
 
-    @abstractmethod
     def reset(self) -> None:
         """Reset strategy state"""
         self._memory_limit = None
         self._exceeded_count = 0
         self._total_exceeded_bytes = 0
-
-    @abstractmethod
-    def allocate(
-        self,
-        tensor: 'TensorInfo',
-        live_tensors: Dict[str, 'TensorInfo'],
-        constraint: 'MemoryConstraint'
-    ) -> AllocationResult:
-        """Allocate memory for a tensor"""
-        pass
-
-    @abstractmethod
-    def deallocate(self, tensor_name: str) -> None:
-        """Free memory for a tensor"""
-        pass
-
-    @abstractmethod
-    def current_memory(self) -> int:
-        """Get current memory usage"""
-        pass
+        self._static_offsets = {}
+        self._reused_from = {}
+        self._total_memory = 0
+        self._active_memory = 0
+        self._active_tensors = set()
 
     def set_memory_limit(self, limit: Optional[int]) -> None:
         """Set memory limit for constraint checking"""
         self._memory_limit = limit
 
     def check_memory_limit(self, required: int) -> Tuple[bool, int]:
-        """
-        Check if allocation would exceed memory limit.
-        Returns (would_exceed, available_bytes)
-        """
+        """Check if allocation would exceed memory limit"""
         if self._memory_limit is None:
             return False, float('inf')
-
         current = self.current_memory()
         available = self._memory_limit - current
         would_exceed = required > available
@@ -121,6 +108,143 @@ class AllocationStrategy(ABC):
         if alignment <= 1:
             return size
         return ((size + alignment - 1) // alignment) * alignment
+
+    def precompute_offsets(
+        self,
+        tensors: List['TensorInfo'],
+        alignment: int = 64,
+    ) -> Dict[str, int]:
+        """
+        Pre-compute static memory offsets for all tensors.
+        Different strategies override _find_offset() to implement different algorithms.
+        """
+        if not tensors:
+            return {}
+
+        self.reset()
+
+        # Sort by birth_step, then by size (larger first for better packing)
+        sorted_tensors = sorted(tensors, key=lambda t: (t.birth_step, -t.size_bytes))
+
+        # Track allocated blocks with their lifetimes
+        allocated_blocks: List[MemoryBlock] = []
+
+        for tensor in sorted_tensors:
+            size = self._align(tensor.size_bytes, alignment)
+            birth = tensor.birth_step
+            death = tensor.death_step
+
+            # Find offset using strategy-specific algorithm
+            offset, reused_from = self._find_offset(
+                size, birth, death, allocated_blocks
+            )
+
+            # Record allocation
+            self._static_offsets[tensor.name] = (offset, size)
+            if reused_from:
+                self._reused_from[tensor.name] = reused_from
+
+            allocated_blocks.append(MemoryBlock(
+                offset=offset,
+                size=size,
+                tensor_name=tensor.name,
+                birth_step=birth,
+                death_step=death,
+            ))
+
+            self._total_memory = max(self._total_memory, offset + size)
+
+        return {name: offset for name, (offset, _) in self._static_offsets.items()}
+
+    @abstractmethod
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """
+        Find memory offset for a tensor. Strategy-specific algorithm.
+        Returns: (offset, reused_from_tensor_name or None)
+        """
+        pass
+
+    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
+        """Allocate using pre-computed offset"""
+        self.set_memory_limit(constraint.max_memory_bytes)
+        size = self._align(tensor.size_bytes, constraint.alignment)
+
+        if tensor.name in self._static_offsets:
+            offset, _ = self._static_offsets[tensor.name]
+            reused_from = self._reused_from.get(tensor.name)
+        else:
+            # Fallback if not pre-computed
+            offset = self._total_memory
+            self._static_offsets[tensor.name] = (offset, size)
+            self._total_memory += size
+            reused_from = None
+
+        exceeded, available = self.check_memory_limit(size)
+        if exceeded:
+            self.record_exceeded(size - available)
+
+        self._active_tensors.add(tensor.name)
+        self._active_memory += size
+
+        return AllocationResult(
+            tensor_name=tensor.name,
+            offset=offset,
+            size=size,
+            reused_from=reused_from,
+            exceeded_limit=exceeded,
+        )
+
+    def deallocate(self, tensor_name: str) -> None:
+        """Deallocate tensor"""
+        if tensor_name in self._active_tensors:
+            self._active_tensors.remove(tensor_name)
+            if tensor_name in self._static_offsets:
+                _, size = self._static_offsets[tensor_name]
+                self._active_memory -= size
+
+    def current_memory(self) -> int:
+        """Get current active memory"""
+        return self._active_memory
+
+    def get_memory_layout(self) -> Dict[str, Dict]:
+        """Get complete static memory layout for code generation"""
+        return {
+            name: {"offset": offset, "size": size}
+            for name, (offset, size) in self._static_offsets.items()
+        }
+
+    def total_static_memory(self) -> int:
+        """Get total static memory required"""
+        return self._total_memory
+
+    def generate_memory_map(self) -> str:
+        """Generate C-style memory map for code generation"""
+        lines = [
+            "// Static Memory Layout",
+            f"// Total Memory Required: {self._total_memory} bytes",
+            f"// Strategy: {self.name}",
+            "",
+            f"#define MEMORY_POOL_SIZE {self._total_memory}",
+            "",
+            "// Tensor Offsets",
+        ]
+
+        for name, (offset, size) in sorted(
+            self._static_offsets.items(), key=lambda x: x[1][0]
+        ):
+            safe_name = name.upper().replace(".", "_").replace("-", "_")
+            reuse_comment = ""
+            if name in self._reused_from:
+                reuse_comment = f" (reuses {self._reused_from[name]})"
+            lines.append(f"#define OFFSET_{safe_name} {offset}  // size: {size}{reuse_comment}")
+
+        return "\n".join(lines)
 
 
 class StrategyRegistry:
@@ -153,148 +277,238 @@ class StrategyRegistry:
 @StrategyRegistry.register("no_reuse")
 class NoReuseStrategy(AllocationStrategy):
     """
-    No memory reuse - calculates maximum memory requirement.
-    With memory constraint: tracks when limit would be exceeded.
+    No memory reuse - each tensor gets unique address.
+    Useful for calculating maximum memory requirement.
     """
-
-    def __init__(self):
-        super().__init__()
-        self._next_offset = 0
-        self._allocations: Dict[str, int] = {}
-        self._active_memory = 0
 
     @property
     def name(self) -> str:
         return "no_reuse"
 
-    def reset(self) -> None:
-        super().reset()
-        self._next_offset = 0
-        self._allocations = {}
-        self._active_memory = 0
-
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        size = self._align(tensor.size_bytes, constraint.alignment)
-
-        # Check memory limit
-        exceeded, available = self.check_memory_limit(size)
-        if exceeded:
-            self.record_exceeded(size - available)
-
-        offset = self._next_offset
-        self._next_offset += size
-        self._allocations[tensor.name] = size
-        self._active_memory += size
-
-        return AllocationResult(
-            tensor_name=tensor.name,
-            offset=offset,
-            size=size,
-            reused_from=None,
-            exceeded_limit=exceeded,
-        )
-
-    def deallocate(self, tensor_name: str) -> None:
-        if tensor_name in self._allocations:
-            self._active_memory -= self._allocations[tensor_name]
-            # Note: in no_reuse, memory is never actually freed for reuse
-
-    def current_memory(self) -> int:
-        return self._active_memory
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Never reuse - always allocate at end"""
+        if not allocated_blocks:
+            return 0, None
+        # Allocate after all existing blocks
+        max_end = max(b.offset + b.size for b in allocated_blocks)
+        return max_end, None
 
 
 @StrategyRegistry.register("greedy")
 class GreedyReuseStrategy(AllocationStrategy):
     """
-    Greedy memory reuse - Best-fit strategy.
-    With memory constraint: prioritizes reuse when approaching limit.
+    Greedy reuse with best-fit algorithm.
+    Finds smallest available gap that fits the tensor.
     """
-
-    def __init__(self):
-        super().__init__()
-        self._memory_pool: List[MemoryBlock] = []
-        self._peak_memory = 0
 
     @property
     def name(self) -> str:
         return "greedy"
 
-    def reset(self) -> None:
-        super().reset()
-        self._memory_pool = []
-        self._peak_memory = 0
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Best-fit: find smallest gap that fits"""
+        if not allocated_blocks:
+            return 0, None
 
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        required = self._align(tensor.size_bytes, constraint.alignment)
+        # Find blocks whose lifetime doesn't overlap
+        available_blocks = [
+            b for b in allocated_blocks
+            if b.death_step < birth  # Block is dead before we're born
+        ]
 
-        # Check memory limit before allocation
-        exceeded, available = self.check_memory_limit(required)
-
-        # Try to find a reusable block (best-fit)
-        best_block = self._find_best_fit(required)
-
-        if best_block is not None:
-            # Reuse existing block
-            reused_from = best_block.tensor_name
-            best_block.is_free = False
-            best_block.tensor_name = tensor.name
-
-            return AllocationResult(
-                tensor_name=tensor.name,
-                offset=best_block.offset,
-                size=required,
-                reused_from=reused_from,
-                exceeded_limit=False,  # Reuse doesn't exceed
-            )
-
-        # No reusable block found - must allocate new
-        if exceeded:
-            self.record_exceeded(required - available)
-
-        offset = sum(b.size for b in self._memory_pool)
-        self._memory_pool.append(MemoryBlock(
-            offset=offset,
-            size=required,
-            is_free=False,
-            tensor_name=tensor.name,
-        ))
-
-        current = self.current_memory()
-        self._peak_memory = max(self._peak_memory, current)
-
-        return AllocationResult(
-            tensor_name=tensor.name,
-            offset=offset,
-            size=required,
-            exceeded_limit=exceeded,
-        )
-
-    def _find_best_fit(self, required: int) -> Optional[MemoryBlock]:
-        """Find the smallest free block that fits the requirement"""
+        # Best-fit: find smallest block that fits
         best_block = None
-        for block in self._memory_pool:
-            if block.can_fit(required):
+        for block in available_blocks:
+            if block.size >= size:
                 if best_block is None or block.size < best_block.size:
                     best_block = block
-        return best_block
 
-    def deallocate(self, tensor_name: str) -> None:
-        for block in self._memory_pool:
-            if block.tensor_name == tensor_name and not block.is_free:
-                block.is_free = True
-                break
+        if best_block:
+            return best_block.offset, best_block.tensor_name
 
-    def current_memory(self) -> int:
-        return sum(b.size for b in self._memory_pool if not b.is_free)
+        # No reusable block - find gap or allocate at end
+        return self._find_gap_or_end(size, birth, allocated_blocks)
+
+    def _find_gap_or_end(
+        self,
+        size: int,
+        birth: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Find a gap in memory or allocate at end"""
+        # Get live blocks at birth time
+        live_blocks = [
+            b for b in allocated_blocks
+            if b.birth_step <= birth <= b.death_step
+        ]
+
+        if not live_blocks:
+            return 0, None
+
+        # Sort by offset and find gaps
+        live_blocks.sort(key=lambda b: b.offset)
+
+        # Check gap at beginning
+        if live_blocks[0].offset >= size:
+            return 0, None
+
+        # Check gaps between blocks
+        for i in range(len(live_blocks) - 1):
+            gap_start = live_blocks[i].offset + live_blocks[i].size
+            gap_end = live_blocks[i + 1].offset
+            if gap_end - gap_start >= size:
+                return gap_start, None
+
+        # Allocate at end
+        max_end = max(b.offset + b.size for b in live_blocks)
+        return max_end, None
+
+
+@StrategyRegistry.register("best_fit")
+class BestFitStrategy(AllocationStrategy):
+    """
+    Best-fit allocation - finds smallest fitting gap.
+    Same as greedy but with different naming for clarity.
+    """
+
+    @property
+    def name(self) -> str:
+        return "best_fit"
+
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Best-fit with gap searching"""
+        if not allocated_blocks:
+            return 0, None
+
+        # Find reusable blocks (dead before we're born)
+        reusable = [
+            b for b in allocated_blocks
+            if b.death_step < birth and b.size >= size
+        ]
+
+        # Best-fit: smallest fitting block
+        if reusable:
+            best = min(reusable, key=lambda b: b.size)
+            return best.offset, best.tensor_name
+
+        # Find gaps among live blocks
+        live_blocks = [
+            b for b in allocated_blocks
+            if not (b.death_step < birth)  # Still alive or overlaps
+        ]
+
+        if not live_blocks:
+            return 0, None
+
+        live_blocks.sort(key=lambda b: b.offset)
+
+        # Find best-fit gap
+        best_gap = None
+        best_gap_size = float('inf')
+
+        # Gap at start
+        if live_blocks[0].offset >= size:
+            if live_blocks[0].offset < best_gap_size:
+                best_gap = 0
+                best_gap_size = live_blocks[0].offset
+
+        # Gaps between blocks
+        for i in range(len(live_blocks) - 1):
+            gap_start = live_blocks[i].offset + live_blocks[i].size
+            gap_size = live_blocks[i + 1].offset - gap_start
+            if gap_size >= size and gap_size < best_gap_size:
+                best_gap = gap_start
+                best_gap_size = gap_size
+
+        if best_gap is not None:
+            return best_gap, None
+
+        # Allocate at end
+        max_end = max(b.offset + b.size for b in live_blocks)
+        return max_end, None
+
+
+@StrategyRegistry.register("first_fit")
+class FirstFitStrategy(AllocationStrategy):
+    """
+    First-fit allocation - finds first fitting gap.
+    Faster than best-fit but may fragment more.
+    """
+
+    @property
+    def name(self) -> str:
+        return "first_fit"
+
+    def _find_offset(
+        self,
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """First-fit: find first available slot"""
+        if not allocated_blocks:
+            return 0, None
+
+        # Find reusable blocks sorted by offset (first-fit)
+        reusable = sorted(
+            [b for b in allocated_blocks if b.death_step < birth and b.size >= size],
+            key=lambda b: b.offset
+        )
+
+        if reusable:
+            return reusable[0].offset, reusable[0].tensor_name
+
+        # Find first gap among live blocks
+        live_blocks = [
+            b for b in allocated_blocks
+            if not (b.death_step < birth)
+        ]
+
+        if not live_blocks:
+            return 0, None
+
+        live_blocks.sort(key=lambda b: b.offset)
+
+        # Check gap at start
+        if live_blocks[0].offset >= size:
+            return 0, None
+
+        # Find first fitting gap
+        for i in range(len(live_blocks) - 1):
+            gap_start = live_blocks[i].offset + live_blocks[i].size
+            gap_size = live_blocks[i + 1].offset - gap_start
+            if gap_size >= size:
+                return gap_start, None
+
+        # Allocate at end
+        max_end = max(b.offset + b.size for b in live_blocks)
+        return max_end, None
 
 
 @StrategyRegistry.register("inplace")
 class InplaceStrategy(AllocationStrategy):
     """
-    Prefer in-place operations when possible.
-    With memory constraint: more aggressively seeks in-place opportunities.
+    In-place allocation - prioritizes reusing input tensor memory.
+    Falls back to best-fit for non-inplace operations.
     """
 
     INPLACE_OPS = {
@@ -305,8 +519,7 @@ class InplaceStrategy(AllocationStrategy):
 
     def __init__(self):
         super().__init__()
-        self._greedy = GreedyReuseStrategy()
-        self._inplace_allocations: Dict[str, str] = {}  # tensor -> inplace_from
+        self._inplace_reuse: Dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -314,448 +527,66 @@ class InplaceStrategy(AllocationStrategy):
 
     def reset(self) -> None:
         super().reset()
-        self._greedy.reset()
-        self._inplace_allocations = {}
+        self._inplace_reuse = {}
 
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        self._greedy.set_memory_limit(constraint.max_memory_bytes)
-
-        # Check memory pressure
-        exceeded, available = self.check_memory_limit(tensor.size_bytes)
-
-        # Try in-place first (especially important when under memory pressure)
-        inplace_candidate = self._find_inplace_candidate(tensor, live_tensors, constraint)
-
-        if inplace_candidate is not None:
-            self._inplace_allocations[tensor.name] = inplace_candidate.name
-            return AllocationResult(
-                tensor_name=tensor.name,
-                offset=inplace_candidate.memory_offset,
-                size=tensor.size_bytes,
-                reused_from=inplace_candidate.name,
-                is_inplace=True,
-                exceeded_limit=False,
-            )
-
-        # Fall back to greedy strategy
-        result = self._greedy.allocate(tensor, live_tensors, constraint)
-
-        # Inherit exceeded stats
-        if result.exceeded_limit:
-            self.record_exceeded(tensor.size_bytes - available)
-
-        return result
-
-    def _find_inplace_candidate(
+    def _find_offset(
         self,
-        tensor,
-        live_tensors: Dict[str, 'TensorInfo'],
-        constraint: 'MemoryConstraint'
-    ) -> Optional['TensorInfo']:
-        """Find a tensor whose memory can be reused in-place"""
+        size: int,
+        birth: int,
+        death: int,
+        allocated_blocks: List[MemoryBlock],
+    ) -> Tuple[int, Optional[str]]:
+        """Prioritize in-place reuse, fall back to best-fit"""
+        if not allocated_blocks:
+            return 0, None
 
-        # Check if operation supports in-place
-        can_inplace = self._can_inplace(tensor)
+        # Find blocks dying exactly at our birth (potential in-place)
+        inplace_candidates = [
+            b for b in allocated_blocks
+            if b.death_step == birth - 1 and b.size >= size
+        ]
 
-        # Under memory pressure, be more aggressive about in-place
-        exceeded, _ = self.check_memory_limit(tensor.size_bytes)
-        if exceeded and constraint.prefer_inplace:
-            can_inplace = True
+        if inplace_candidates:
+            # Prefer exact size match for in-place
+            exact_match = [b for b in inplace_candidates if b.size == size]
+            if exact_match:
+                return exact_match[0].offset, exact_match[0].tensor_name
+            # Otherwise smallest fitting
+            best = min(inplace_candidates, key=lambda b: b.size)
+            return best.offset, best.tensor_name
 
-        if not can_inplace:
-            return None
+        # Fall back to best-fit
+        reusable = [
+            b for b in allocated_blocks
+            if b.death_step < birth and b.size >= size
+        ]
 
-        # Find compatible tensor
-        for input_tensor in live_tensors.values():
-            if self._is_compatible(tensor, input_tensor):
-                return input_tensor
+        if reusable:
+            best = min(reusable, key=lambda b: b.size)
+            return best.offset, best.tensor_name
 
-        return None
+        # Find gap or allocate at end
+        live_blocks = [
+            b for b in allocated_blocks
+            if not (b.death_step < birth)
+        ]
 
-    def _can_inplace(self, tensor) -> bool:
-        """Check if tensor operation can be done in-place"""
-        op_name = tensor.name.lower()
-        for inplace_op in self.INPLACE_OPS:
-            if inplace_op in op_name:
-                return True
-        return False
+        if not live_blocks:
+            return 0, None
 
-    def _is_compatible(self, tensor, input_tensor) -> bool:
-        """Check if tensor can reuse input_tensor's memory"""
-        # Same size or smaller
-        if tensor.size_bytes > input_tensor.size_bytes:
-            return False
-        # Input is about to die (last use is current step)
-        if input_tensor.death_step != tensor.birth_step:
-            return False
-        # Must have valid memory offset
-        if input_tensor.memory_offset < 0:
-            return False
-        return True
-
-    def deallocate(self, tensor_name: str) -> None:
-        if tensor_name in self._inplace_allocations:
-            del self._inplace_allocations[tensor_name]
-        else:
-            self._greedy.deallocate(tensor_name)
-
-    def current_memory(self) -> int:
-        return self._greedy.current_memory()
+        live_blocks.sort(key=lambda b: b.offset)
+        max_end = max(b.offset + b.size for b in live_blocks)
+        return max_end, None
 
 
-@StrategyRegistry.register("best_fit")
-class BestFitStrategy(AllocationStrategy):
-    """
-    Best-fit allocation with memory defragmentation hints.
-    With memory constraint: coalesces free blocks when approaching limit.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._memory_pool: List[MemoryBlock] = []
-        self._total_allocated = 0
-
-    @property
-    def name(self) -> str:
-        return "best_fit"
-
-    def reset(self) -> None:
-        super().reset()
-        self._memory_pool = []
-        self._total_allocated = 0
-
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        required = self._align(tensor.size_bytes, constraint.alignment)
-
-        exceeded, available = self.check_memory_limit(required)
-
-        # Try to find best-fit block
-        best_block = self._find_best_fit(required)
-
-        # If approaching memory limit, try to coalesce free blocks
-        if best_block is None and exceeded:
-            self._coalesce_free_blocks()
-            best_block = self._find_best_fit(required)
-
-        if best_block is not None:
-            reused_from = best_block.tensor_name
-            best_block.is_free = False
-            best_block.tensor_name = tensor.name
-
-            return AllocationResult(
-                tensor_name=tensor.name,
-                offset=best_block.offset,
-                size=required,
-                reused_from=reused_from,
-                exceeded_limit=False,
-            )
-
-        # Allocate new block
-        if exceeded:
-            self.record_exceeded(required - available)
-
-        offset = self._total_allocated
-        self._memory_pool.append(MemoryBlock(
-            offset=offset,
-            size=required,
-            is_free=False,
-            tensor_name=tensor.name,
-        ))
-        self._total_allocated += required
-
-        return AllocationResult(
-            tensor_name=tensor.name,
-            offset=offset,
-            size=required,
-            exceeded_limit=exceeded,
-        )
-
-    def _find_best_fit(self, required: int) -> Optional[MemoryBlock]:
-        """Find smallest free block that fits"""
-        best = None
-        for block in self._memory_pool:
-            if block.can_fit(required):
-                if best is None or block.size < best.size:
-                    best = block
-        return best
-
-    def _coalesce_free_blocks(self) -> None:
-        """Merge adjacent free blocks (logical coalescing)"""
-        # Sort by offset
-        self._memory_pool.sort(key=lambda b: b.offset)
-
-        # Merge adjacent free blocks
-        i = 0
-        while i < len(self._memory_pool) - 1:
-            current = self._memory_pool[i]
-            next_block = self._memory_pool[i + 1]
-
-            if current.is_free and next_block.is_free:
-                # Merge
-                current.size += next_block.size
-                self._memory_pool.pop(i + 1)
-            else:
-                i += 1
-
-    def deallocate(self, tensor_name: str) -> None:
-        for block in self._memory_pool:
-            if block.tensor_name == tensor_name and not block.is_free:
-                block.is_free = True
-                break
-
-    def current_memory(self) -> int:
-        return sum(b.size for b in self._memory_pool if not b.is_free)
-
-
-@StrategyRegistry.register("first_fit")
-class FirstFitStrategy(AllocationStrategy):
-    """
-    First-fit allocation - faster but may fragment more.
-    With memory constraint: falls back to best-fit when constrained.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._memory_pool: List[MemoryBlock] = []
-        self._total_allocated = 0
-
-    @property
-    def name(self) -> str:
-        return "first_fit"
-
-    def reset(self) -> None:
-        super().reset()
-        self._memory_pool = []
-        self._total_allocated = 0
-
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        required = self._align(tensor.size_bytes, constraint.alignment)
-
-        exceeded, available = self.check_memory_limit(required)
-
-        # First-fit: find first block that fits
-        found_block = None
-        for block in self._memory_pool:
-            if block.can_fit(required):
-                found_block = block
-                break
-
-        # If constrained and no first-fit, try best-fit
-        if found_block is None and exceeded:
-            found_block = self._find_best_fit(required)
-
-        if found_block is not None:
-            reused_from = found_block.tensor_name
-            found_block.is_free = False
-            found_block.tensor_name = tensor.name
-
-            return AllocationResult(
-                tensor_name=tensor.name,
-                offset=found_block.offset,
-                size=required,
-                reused_from=reused_from,
-                exceeded_limit=False,
-            )
-
-        # Allocate new
-        if exceeded:
-            self.record_exceeded(required - available)
-
-        offset = self._total_allocated
-        self._memory_pool.append(MemoryBlock(
-            offset=offset,
-            size=required,
-            is_free=False,
-            tensor_name=tensor.name,
-        ))
-        self._total_allocated += required
-
-        return AllocationResult(
-            tensor_name=tensor.name,
-            offset=offset,
-            size=required,
-            exceeded_limit=exceeded,
-        )
-
-    def _find_best_fit(self, required: int) -> Optional[MemoryBlock]:
-        """Fallback to best-fit when constrained"""
-        best = None
-        for block in self._memory_pool:
-            if block.can_fit(required):
-                if best is None or block.size < best.size:
-                    best = block
-        return best
-
-    def deallocate(self, tensor_name: str) -> None:
-        for block in self._memory_pool:
-            if block.tensor_name == tensor_name and not block.is_free:
-                block.is_free = True
-                break
-
-    def current_memory(self) -> int:
-        return sum(b.size for b in self._memory_pool if not b.is_free)
-
-
+# Keep "static" as alias for greedy (backward compatibility)
 @StrategyRegistry.register("static")
-class StaticAllocationStrategy(AllocationStrategy):
+class StaticAllocationStrategy(GreedyReuseStrategy):
     """
-    Static memory allocation - pre-computes fixed offsets at compile time.
-    No runtime memory pool management, each tensor gets a fixed address.
-
-    Uses interval coloring algorithm to minimize total memory while
-    ensuring non-overlapping lifetimes share the same memory region.
+    Static allocation - alias for greedy strategy.
+    Kept for backward compatibility.
     """
-
-    def __init__(self):
-        super().__init__()
-        # Pre-computed static offsets: tensor_name -> (offset, size)
-        self._static_offsets: Dict[str, Tuple[int, int]] = {}
-        self._total_memory = 0
-        self._active_memory = 0
-        self._active_tensors: set = set()
 
     @property
     def name(self) -> str:
         return "static"
-
-    def reset(self) -> None:
-        super().reset()
-        self._static_offsets = {}
-        self._total_memory = 0
-        self._active_memory = 0
-        self._active_tensors = set()
-
-    def precompute_offsets(
-        self,
-        tensors: List['TensorInfo'],
-        alignment: int = 64,
-    ) -> Dict[str, int]:
-        """
-        Pre-compute static memory offsets for all tensors.
-        Uses interval graph coloring to find optimal placement.
-
-        Returns: Dict mapping tensor_name -> fixed_offset
-        """
-        if not tensors:
-            return {}
-
-        # Sort by birth_step for deterministic ordering
-        sorted_tensors = sorted(tensors, key=lambda t: (t.birth_step, -t.size_bytes))
-
-        # Track allocated regions: list of (offset, end_offset, death_step)
-        allocated_regions: List[Tuple[int, int, int]] = []
-
-        for tensor in sorted_tensors:
-            size = self._align(tensor.size_bytes, alignment)
-            birth = tensor.birth_step
-            death = tensor.death_step
-
-            # Find a gap where this tensor can fit
-            # Remove expired regions first
-            allocated_regions = [
-                (off, end, d) for off, end, d in allocated_regions
-                if d >= birth  # Keep regions that are still alive
-            ]
-
-            # Sort by offset to find gaps
-            allocated_regions.sort(key=lambda r: r[0])
-
-            # Find first gap that fits
-            best_offset = None
-            current_pos = 0
-
-            for region_offset, region_end, _ in allocated_regions:
-                if current_pos + size <= region_offset:
-                    # Found a gap
-                    best_offset = current_pos
-                    break
-                current_pos = max(current_pos, region_end)
-
-            if best_offset is None:
-                # No gap found, allocate at the end
-                best_offset = current_pos
-
-            # Record this allocation
-            self._static_offsets[tensor.name] = (best_offset, size)
-            allocated_regions.append((best_offset, best_offset + size, death))
-            self._total_memory = max(self._total_memory, best_offset + size)
-
-        return {name: offset for name, (offset, _) in self._static_offsets.items()}
-
-    def allocate(self, tensor, live_tensors, constraint) -> AllocationResult:
-        self.set_memory_limit(constraint.max_memory_bytes)
-        size = self._align(tensor.size_bytes, constraint.alignment)
-
-        # Check if we have pre-computed offset
-        if tensor.name in self._static_offsets:
-            offset, _ = self._static_offsets[tensor.name]
-        else:
-            # Fallback: allocate at next available position
-            offset = self._total_memory
-            self._static_offsets[tensor.name] = (offset, size)
-            self._total_memory += size
-
-        # Check memory limit
-        exceeded, available = self.check_memory_limit(size)
-        if exceeded:
-            self.record_exceeded(size - available)
-
-        self._active_tensors.add(tensor.name)
-        self._active_memory += size
-
-        return AllocationResult(
-            tensor_name=tensor.name,
-            offset=offset,
-            size=size,
-            reused_from=None,  # Static allocation, no runtime reuse concept
-            exceeded_limit=exceeded,
-        )
-
-    def deallocate(self, tensor_name: str) -> None:
-        if tensor_name in self._active_tensors:
-            self._active_tensors.remove(tensor_name)
-            if tensor_name in self._static_offsets:
-                _, size = self._static_offsets[tensor_name]
-                self._active_memory -= size
-
-    def current_memory(self) -> int:
-        return self._active_memory
-
-    def get_memory_layout(self) -> Dict[str, Dict]:
-        """
-        Get the complete static memory layout.
-        Returns dict with tensor_name -> {offset, size} for code generation.
-        """
-        return {
-            name: {"offset": offset, "size": size}
-            for name, (offset, size) in self._static_offsets.items()
-        }
-
-    def total_static_memory(self) -> int:
-        """Get total static memory required"""
-        return self._total_memory
-
-    def generate_memory_map(self) -> str:
-        """
-        Generate C-style memory map for static allocation.
-        Useful for embedded systems or hardware code generation.
-        """
-        lines = [
-            "// Static Memory Layout",
-            f"// Total Memory Required: {self._total_memory} bytes",
-            "",
-            "#define MEMORY_POOL_SIZE {}".format(self._total_memory),
-            "",
-            "// Tensor Offsets",
-        ]
-
-        for name, (offset, size) in sorted(
-            self._static_offsets.items(), key=lambda x: x[1][0]
-        ):
-            safe_name = name.upper().replace(".", "_").replace("-", "_")
-            lines.append(f"#define OFFSET_{safe_name} {offset}  // size: {size}")
-
-        return "\n".join(lines)
