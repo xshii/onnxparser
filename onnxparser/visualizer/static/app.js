@@ -156,12 +156,29 @@ class VisualizerApp {
         if (!this.currentModel) return;
 
         try {
-            const res = await fetch(`/api/memory?name=${encodeURIComponent(this.currentModel)}&strategy=${this.currentStrategy}`);
+            let url = `/api/memory?name=${encodeURIComponent(this.currentModel)}&strategy=${this.currentStrategy}`;
+
+            // Include memory limit if specified
+            const limitInput = document.getElementById('memory-limit');
+            if (limitInput && limitInput.value) {
+                const limitKB = parseFloat(limitInput.value);
+                if (limitKB > 0) {
+                    url += `&limit=${limitKB}`;
+                }
+            }
+
+            const res = await fetch(url);
             this.memoryData = await res.json();
         } catch (e) {
             console.error('Failed to load memory data:', e);
             this.memoryData = { error: e.message };
         }
+    }
+
+    async applyMemoryConstraint() {
+        // Reload memory data with the new constraint
+        await this.loadMemoryData();
+        this.renderMemoryChart();
     }
 
     async changeStrategy() {
@@ -725,8 +742,28 @@ class VisualizerApp {
             return;
         }
 
-        document.getElementById('mem-peak').textContent = this.memoryData.summary.peak_min_kb.toFixed(1);
+        const peakEl = document.getElementById('mem-peak');
+        peakEl.textContent = this.memoryData.summary.peak_min_kb.toFixed(1);
         document.getElementById('mem-savings').textContent = this.memoryData.summary.savings_pct.toFixed(1);
+
+        // Update constraint status display
+        const statusEl = document.getElementById('constraint-status');
+        const constraint = this.memoryData.constraint;
+        if (constraint && constraint.limit_kb) {
+            if (constraint.fits_in_limit) {
+                statusEl.textContent = 'Fits';
+                statusEl.className = 'constraint-status fits';
+                peakEl.style.color = '#10b981';
+            } else {
+                statusEl.textContent = `+${constraint.overflow_kb.toFixed(1)}KB`;
+                statusEl.className = 'constraint-status exceeded';
+                peakEl.style.color = '#ef4444';
+            }
+        } else {
+            statusEl.textContent = '';
+            statusEl.className = 'constraint-status';
+            peakEl.style.color = '';
+        }
 
         const tensors = this.memoryData.tensors;
         if (!tensors || tensors.length === 0) {
@@ -836,7 +873,7 @@ class VisualizerApp {
     }
 
     renderMemoryLayoutChart() {
-        // Memory layout view: Y-axis = address, X-axis = TID
+        // Memory layout view: Y-axis = address, X-axis = TID (execution step)
         if (!this.memoryData || this.memoryData.error) {
             document.getElementById('memory-chart').innerHTML =
                 `<div class="no-model"><div>${this.memoryData?.error || 'Memory analysis not available'}</div></div>`;
@@ -849,42 +886,59 @@ class VisualizerApp {
             return;
         }
 
-        // Assign addresses based on execution order (simulated memory layout)
-        // Sort by birth time to simulate allocation order
-        const sortedTensors = [...tensors].sort((a, b) => a.birth - b.birth);
-
-        // Simple first-fit memory allocation simulation
-        let currentAddress = 0;
-        const allocations = [];
-
-        sortedTensors.forEach((t, idx) => {
-            const sizeBytes = t.size_kb * 1024;
-            allocations.push({
+        // Use real memory_offset from backend if available, otherwise compute
+        const allocations = tensors.map(t => {
+            const sizeBytes = t.size_bytes || (t.size_kb * 1024);
+            // Use backend-computed offset if available (>= 0), otherwise use birth order
+            const hasRealOffset = t.memory_offset !== undefined && t.memory_offset >= 0;
+            return {
                 ...t,
-                address: currentAddress,
+                address: hasRealOffset ? t.memory_offset : null,
                 size: sizeBytes,
-                tid: t.birth,  // Use birth step as TID
-            });
-            currentAddress += sizeBytes;
+                tid: t.birth,
+            };
         });
+
+        // If no real offsets, compute simulated layout for display
+        if (allocations.some(a => a.address === null)) {
+            // Sort by birth time, then use simple stacking
+            allocations.sort((a, b) => a.birth - b.birth);
+            let currentAddress = 0;
+            allocations.forEach(a => {
+                if (a.address === null) {
+                    a.address = currentAddress;
+                    currentAddress += a.size;
+                }
+            });
+        }
 
         // Create traces for the layout view
         const traces = allocations.map((t) => {
             let color;
+            let lineColor;
             const isHighlighted = this.selectedNode && t.name === this.selectedNode.name;
 
             if (isHighlighted) {
                 color = '#fbbf24';
+                lineColor = '#fbbf24';
+            } else if (t.reused_from) {
+                // Memory reuse - purple
+                color = this.selectedNode ? 'rgba(139, 92, 246, 0.4)' : '#8b5cf6';
+                lineColor = 'rgba(139, 92, 246, 0.8)';
             } else if (t.is_input) {
                 color = this.selectedNode ? 'rgba(16, 185, 129, 0.4)' : '#10b981';
+                lineColor = 'rgba(255,255,255,0.3)';
             } else if (t.is_output) {
                 color = this.selectedNode ? 'rgba(245, 158, 11, 0.4)' : '#f59e0b';
+                lineColor = 'rgba(255,255,255,0.3)';
             } else {
                 color = this.selectedNode ? 'rgba(59, 130, 246, 0.4)' : '#3b82f6';
+                lineColor = 'rgba(255,255,255,0.3)';
             }
 
             const addrStart = t.address;
             const addrEnd = t.address + t.size;
+            const reusedInfo = t.reused_from ? `<br>Reused from: ${t.reused_from}` : '';
 
             return {
                 x: [t.tid, t.tid + 1, t.tid + 1, t.tid, t.tid],  // Rectangle vertices
@@ -894,10 +948,10 @@ class VisualizerApp {
                 fill: 'toself',
                 fillcolor: color,
                 line: {
-                    color: isHighlighted ? '#fbbf24' : 'rgba(255,255,255,0.3)',
+                    color: isHighlighted ? '#fbbf24' : lineColor,
                     width: isHighlighted ? 2 : 1
                 },
-                hovertemplate: `<b>${t.name}</b><br>Address: 0x${addrStart.toString(16)} - 0x${addrEnd.toString(16)}<br>Size: ${t.size_kb.toFixed(2)} KB<br>TID: ${t.tid}<extra></extra>`,
+                hovertemplate: `<b>${t.name}</b><br>Address: 0x${addrStart.toString(16)} - 0x${addrEnd.toString(16)}<br>Size: ${t.size_kb.toFixed(2)} KB<br>TID: ${t.tid}${reusedInfo}<extra></extra>`,
                 showlegend: false,
                 customdata: t,
             };

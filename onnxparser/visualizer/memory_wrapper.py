@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Memory analysis wrapper for visualization"""
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
+import torch
 import torch.fx as fx
 
 
@@ -10,12 +11,35 @@ class MemoryAnalyzerWrapper:
     """Wrapper for memory analysis integration"""
 
     @staticmethod
-    def analyze(gm: fx.GraphModule, strategy: str = "greedy") -> Dict[str, Any]:
-        """Run memory analysis with specified strategy"""
-        try:
-            from ..analysis.memory_analyzer import MemoryAnalyzer
+    def analyze(
+        gm: fx.GraphModule,
+        strategy: str = "greedy",
+        input_data: Optional[Dict[str, torch.Tensor]] = None,
+        memory_limit_kb: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """Run memory analysis with specified strategy
 
-            analyzer = MemoryAnalyzer(gm, strategy=strategy)
+        Args:
+            gm: FX GraphModule to analyze
+            strategy: Memory allocation strategy
+            input_data: Optional input data for shape propagation
+            memory_limit_kb: Optional memory limit in KB
+        """
+        try:
+            from ..analysis.memory_analyzer import MemoryAnalyzer, MemoryConstraint
+
+            # Propagate shapes if input_data is provided
+            if input_data:
+                MemoryAnalyzerWrapper._propagate_shapes(gm, input_data)
+
+            # Create memory constraint if limit is specified
+            constraint = None
+            if memory_limit_kb is not None:
+                constraint = MemoryConstraint(
+                    max_memory_bytes=int(memory_limit_kb * 1024)
+                )
+
+            analyzer = MemoryAnalyzer(gm, strategy=strategy, constraint=constraint)
             result = analyzer.analyze()
 
             tensors = []
@@ -44,7 +68,18 @@ class MemoryAnalyzerWrapper:
                     "max_memory": step.max_memory,
                     "min_memory": step.min_memory,
                     "live_tensors": step.live_tensors,
+                    "exceeded_limit": step.exceeded_limit,
                 })
+
+            # Build constraint info
+            constraint_info = {}
+            if memory_limit_kb is not None:
+                constraint_info = {
+                    "limit_kb": memory_limit_kb,
+                    "exceeded_count": result.exceeded_count,
+                    "fits_in_limit": result.fits_in_limit,
+                    "overflow_kb": result.overflow_bytes / 1024,
+                }
 
             return {
                 "strategy": strategy,
@@ -54,10 +89,37 @@ class MemoryAnalyzerWrapper:
                     "peak_max_kb": result.peak_max_memory / 1024,
                     "peak_min_kb": result.peak_min_memory / 1024,
                     "savings_pct": result.savings_ratio * 100,
-                }
+                },
+                "constraint": constraint_info,
             }
         except Exception as e:
             return {"error": str(e)}
+
+    @staticmethod
+    def _propagate_shapes(gm: fx.GraphModule, input_data: Dict[str, torch.Tensor]) -> None:
+        """Propagate shapes through the graph using input data"""
+        try:
+            from torch.fx.passes.shape_prop import ShapeProp
+
+            # Build input args based on graph placeholder order
+            example_inputs = []
+            for node in gm.graph.nodes:
+                if node.op == "placeholder":
+                    if node.name in input_data:
+                        example_inputs.append(input_data[node.name])
+                    else:
+                        # Try to find a matching key
+                        for key, val in input_data.items():
+                            if key in node.name or node.name in key:
+                                example_inputs.append(val)
+                                break
+
+            if example_inputs:
+                ShapeProp(gm).propagate(*example_inputs)
+        except Exception as e:
+            # Shape propagation failed, shapes may not be available
+            import warnings
+            warnings.warn(f"Shape propagation failed: {e}")
 
     @staticmethod
     def list_strategies() -> List[str]:

@@ -101,10 +101,12 @@
                 </select>
                 <div class="memory-constraint">
                     <label title="Set memory constraint (KB)">
-                        <input type="number" id="memory-limit" placeholder="Limit KB" style="width:80px;">
+                        <input type="number" id="memory-limit" placeholder="Limit KB" style="width:70px;">
+                        <button class="btn-small" onclick="app.applyMemoryConstraint()" title="Apply constraint">Apply</button>
                         <input type="checkbox" id="show-limit" onchange="app.renderMemoryChart()" title="Show limit line">
                     </label>
                 </div>
+                <div class="constraint-status" id="constraint-status"></div>
                 <div class="memory-stats">
                     <span>Peak: <strong id="mem-peak">-</strong> KB</span>
                     <span>Savings: <strong id="mem-savings">-</strong>%</span>

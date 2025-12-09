@@ -66,17 +66,21 @@ class ModelManager:
         self.cache[cache_key] = data
         return data
 
-    def get_memory_data(self, name: str, strategy: str = "greedy") -> Optional[Dict]:
+    def get_memory_data(self, name: str, strategy: str = "greedy",
+                        memory_limit_kb: Optional[float] = None) -> Optional[Dict]:
         """Get memory analysis data for a model"""
         if name not in self.models:
             return None
 
-        cache_key = f"{name}_memory_{strategy}"
+        # Include memory limit in cache key
+        limit_str = f"_{memory_limit_kb}" if memory_limit_kb else ""
+        cache_key = f"{name}_memory_{strategy}{limit_str}"
         if cache_key in self.cache:
             return self.cache[cache_key]
 
         gm = self.models[name]
-        data = MemoryAnalyzerWrapper.analyze(gm, strategy)
+        input_data = self.input_data.get(name)
+        data = MemoryAnalyzerWrapper.analyze(gm, strategy, input_data, memory_limit_kb)
         self.cache[cache_key] = data
         return data
 

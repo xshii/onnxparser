@@ -388,6 +388,37 @@ header h1 {
     cursor: pointer;
 }
 
+.btn-small {
+    padding: 4px 8px;
+    background: rgba(245, 158, 11, 0.2);
+    border: 1px solid rgba(245, 158, 11, 0.5);
+    border-radius: 4px;
+    color: #fbbf24;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-small:hover {
+    background: rgba(245, 158, 11, 0.4);
+}
+
+.constraint-status {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+
+.constraint-status.fits {
+    background: rgba(16, 185, 129, 0.2);
+    color: #10b981;
+}
+
+.constraint-status.exceeded {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
+}
+
 .memory-stats {
     display: flex;
     gap: 20px;

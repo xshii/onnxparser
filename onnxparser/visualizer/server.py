@@ -60,11 +60,13 @@ def create_app() -> Flask:
     def get_memory():
         name = request.args.get("name")
         strategy = request.args.get("strategy", "greedy")
+        # Memory constraint in KB (optional)
+        memory_limit_kb = request.args.get("limit", type=float)
 
         if not name:
             return jsonify({"error": "Missing model name"}), 400
 
-        data = manager.get_memory_data(name, strategy)
+        data = manager.get_memory_data(name, strategy, memory_limit_kb)
         if data:
             return jsonify(data)
         return jsonify({"error": f"Model '{name}' not found"}), 404
@@ -209,34 +211,39 @@ def serve_dynamic(models: Optional[Dict[str, fx.GraphModule]] = None,
 
 def _build_demo_model():
     """Build a demo transformer model for testing"""
-    from ..builder import GraphBuilder
+    import torch.nn as nn
 
     print("Building demo transformer model...")
-    builder = GraphBuilder()
 
-    # Simple transformer block
-    x = builder.placeholder("input", shape=(2, 8, 64))
+    class DemoTransformer(nn.Module):
+        def __init__(self, dim=64):
+            super().__init__()
+            self.query = nn.Linear(dim, dim)
+            self.key = nn.Linear(dim, dim)
+            self.value = nn.Linear(dim, dim)
+            self.ffn1 = nn.Linear(dim, dim * 4)
+            self.ffn2 = nn.Linear(dim * 4, dim)
+            self.ln = nn.LayerNorm(dim)
 
-    # Attention
-    q = builder.linear(x, 64, name="query")
-    k = builder.linear(x, 64, name="key")
-    v = builder.linear(x, 64, name="value")
+        def forward(self, x):
+            # Self-attention
+            q = self.query(x)
+            k = self.key(x)
+            v = self.value(x)
+            scores = torch.matmul(q, k.transpose(-2, -1)) / 8.0
+            attn = torch.softmax(scores, dim=-1)
+            attn_out = torch.matmul(attn, v)
 
-    scores = builder.matmul(q, builder.transpose(k, -2, -1))
-    scores = builder.div(scores, 8.0)
-    attn = builder.softmax(scores, dim=-1)
-    attn_out = builder.matmul(attn, v)
+            # FFN with residual
+            ffn = self.ffn1(attn_out)
+            ffn = torch.relu(ffn)
+            ffn = self.ffn2(ffn)
+            out = self.ln(x + ffn)
+            return out
 
-    # FFN
-    ffn = builder.linear(attn_out, 256, name="ffn1")
-    ffn = builder.relu(ffn)
-    ffn = builder.linear(ffn, 64, name="ffn2")
-
-    out = builder.add(x, ffn)
-    out = builder.layer_norm(out, [64], name="ln")
-
-    builder.output(out)
-    return builder.build()
+    model = DemoTransformer()
+    gm = fx.symbolic_trace(model)
+    return gm
 
 
 def main():
@@ -266,7 +273,7 @@ Examples:
 
     # Build demo model
     gm = _build_demo_model()
-    input_data = {"input": torch.randn(2, 8, 64)}
+    input_data = {"x": torch.randn(2, 8, 64)}
 
     print(f"\nStarting visualization server on port {args.port}...")
     print(f"Open http://localhost:{args.port} in your browser\n")

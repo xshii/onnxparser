@@ -246,16 +246,29 @@ class MemoryAnalyzer:
         dynamic_shapes: Dict[str, int]
     ) -> Optional[List[int]]:
         """Get tensor shape from node"""
-        # Try meta first
-        if "shape" in node.meta:
+        shape = None
+
+        # Try tensor_meta first (from ShapeProp)
+        if "tensor_meta" in node.meta:
+            tm = node.meta["tensor_meta"]
+            if hasattr(tm, 'shape'):
+                shape = list(tm.shape)
+
+        # Then try shape key (from manual annotation)
+        if shape is None and "shape" in node.meta:
             shape = node.meta["shape"]
-            # Replace dynamic dims
+
+        # Resolve dynamic dimensions if we found a shape
+        if shape is not None:
             resolved = []
             for dim in shape:
                 if isinstance(dim, str):
                     resolved.append(dynamic_shapes.get(dim, 1))
                 elif dim is None:
                     resolved.append(dynamic_shapes.get("batch", 1))
+                elif hasattr(dim, 'item'):
+                    # Handle torch.Size elements
+                    resolved.append(int(dim))
                 else:
                     resolved.append(dim)
             return resolved
@@ -276,6 +289,13 @@ class MemoryAnalyzer:
 
     def _get_dtype(self, node: fx.Node) -> torch.dtype:
         """Get tensor dtype from node"""
+        # Try tensor_meta first (from ShapeProp)
+        if "tensor_meta" in node.meta:
+            tm = node.meta["tensor_meta"]
+            if hasattr(tm, 'dtype'):
+                return tm.dtype
+
+        # Then try dtype key (from manual annotation)
         if "dtype" in node.meta:
             return to_torch_dtype(node.meta["dtype"])
 
