@@ -96,6 +96,7 @@
                 <div class="memory-view-tabs">
                     <button class="mem-tab active" data-view="lifetime" onclick="app.setMemoryView('lifetime')">Lifetime</button>
                     <button class="mem-tab" data-view="layout" onclick="app.setMemoryView('layout')">Layout</button>
+                    <button class="mem-tab" data-view="transfer" onclick="app.setMemoryView('transfer')">Transfer</button>
                 </div>
                 <select class="strategy-select" id="strategy-select" onchange="app.changeStrategy()">
                 </select>
@@ -125,6 +126,12 @@
                 <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#3b82f6"></div>Tensor</div>
                 <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#f59e0b"></div>Output</div>
                 <div class="memory-legend-item" style="margin-left:auto;color:#64748b;">Y: Address | X: TID</div>
+            </div>
+            <div class="memory-legend" id="memory-legend-transfer" style="display:none;">
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#10b981"></div>Load (DDR→SRAM)</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#ef4444"></div>Store (SRAM→DDR)</div>
+                <div class="memory-legend-item"><div class="memory-legend-dot" style="background:#8b5cf6"></div>Overwrite</div>
+                <div class="memory-legend-item" style="margin-left:auto;color:#64748b;">X: Execution Step</div>
             </div>
         </div>
     </div>

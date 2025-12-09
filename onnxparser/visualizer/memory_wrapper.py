@@ -7,6 +7,80 @@ import torch
 import torch.fx as fx
 
 
+class MemoryTransferWrapper:
+    """Wrapper for memory transfer scheduling"""
+
+    @staticmethod
+    def schedule_transfers(
+        gm: fx.GraphModule,
+        on_chip_size_kb: float,
+        strategy: str = "no_reuse",
+        enable_store: bool = True,
+        trace_mode: bool = False,
+        input_data: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Schedule memory transfers for on-chip/off-chip memory management.
+
+        Args:
+            gm: FX GraphModule
+            on_chip_size_kb: On-chip memory size in KB
+            strategy: Memory allocation strategy (default: no_reuse for accurate sizing)
+            enable_store: Generate explicit Store nodes
+            trace_mode: Generate Store even for overwrites
+            input_data: Optional input data for shape propagation
+        """
+        try:
+            from ..analysis.memory_analyzer import MemoryAnalyzer
+            from ..analysis.memory_scheduler import schedule_memory_transfers
+
+            # First run shape propagation
+            if input_data:
+                MemoryTransferWrapper._propagate_shapes(gm, input_data)
+
+            # Run memory analysis to get tensor info
+            # Use no_reuse as default to get accurate tensor sizes without reuse
+            analyzer = MemoryAnalyzer(gm, strategy=strategy)
+            result = analyzer.analyze()
+
+            # Schedule transfers
+            schedule = schedule_memory_transfers(
+                gm,
+                result.tensors,
+                on_chip_size_kb=on_chip_size_kb,
+                enable_store=enable_store,
+                trace_mode=trace_mode,
+            )
+
+            return schedule.to_dict()
+
+        except Exception as e:
+            import traceback
+            return {"error": str(e), "traceback": traceback.format_exc()}
+
+    @staticmethod
+    def _propagate_shapes(gm: fx.GraphModule, input_data: Dict[str, torch.Tensor]) -> None:
+        """Propagate shapes through the graph"""
+        try:
+            from torch.fx.passes.shape_prop import ShapeProp
+
+            example_inputs = []
+            for node in gm.graph.nodes:
+                if node.op == "placeholder":
+                    if node.name in input_data:
+                        example_inputs.append(input_data[node.name])
+                    else:
+                        for key, val in input_data.items():
+                            if key in node.name or node.name in key:
+                                example_inputs.append(val)
+                                break
+
+            if example_inputs:
+                ShapeProp(gm).propagate(*example_inputs)
+        except Exception:
+            pass
+
+
 class MemoryAnalyzerWrapper:
     """Wrapper for memory analysis integration"""
 
@@ -133,7 +207,6 @@ class MemoryAnalyzerWrapper:
 
 def main():
     """Test memory analyzer wrapper with a demo model"""
-    import torch
     import torch.nn as nn
 
     print("Testing MemoryAnalyzerWrapper...")

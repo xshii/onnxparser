@@ -11,11 +11,12 @@ class VisualizerApp {
         this.currentModel = null;
         this.graphData = null;
         this.memoryData = null;
-        this.currentStrategy = 'greedy';
+        this.transferData = null;
+        this.currentStrategy = 'no_reuse';
         this.selectedNode = null;
         this.flowActive = false;
         this.currentView = 'all';
-        this.memoryViewMode = 'lifetime';  // 'lifetime' or 'layout'
+        this.memoryViewMode = 'lifetime';  // 'lifetime', 'layout', or 'transfer'
 
         // D3 elements
         this.svg = null;
@@ -178,7 +179,39 @@ class VisualizerApp {
     async applyMemoryConstraint() {
         // Reload memory data with the new constraint
         await this.loadMemoryData();
+        // Also load transfer schedule if on transfer view
+        if (this.memoryViewMode === 'transfer') {
+            await this.loadTransferData();
+        }
         this.renderMemoryChart();
+    }
+
+    async loadTransferData() {
+        if (!this.currentModel) return;
+
+        const limitInput = document.getElementById('memory-limit');
+        if (!limitInput || !limitInput.value) {
+            this.transferData = { error: 'Set on-chip memory limit to see transfer schedule' };
+            return;
+        }
+
+        const onChipKB = parseFloat(limitInput.value);
+        if (onChipKB <= 0) {
+            this.transferData = { error: 'Invalid memory limit' };
+            return;
+        }
+
+        try {
+            const enableStore = document.getElementById('enable-store')?.checked !== false;
+            const traceMode = document.getElementById('trace-mode')?.checked === true;
+
+            const url = `/api/transfers?name=${encodeURIComponent(this.currentModel)}&on_chip_kb=${onChipKB}&strategy=${this.currentStrategy}&enable_store=${enableStore}&trace_mode=${traceMode}`;
+            const res = await fetch(url);
+            this.transferData = await res.json();
+        } catch (e) {
+            console.error('Failed to load transfer data:', e);
+            this.transferData = { error: e.message };
+        }
     }
 
     async changeStrategy() {
@@ -712,7 +745,7 @@ class VisualizerApp {
 
     // === Memory Visualization ===
 
-    setMemoryView(mode) {
+    async setMemoryView(mode) {
         this.memoryViewMode = mode;
 
         // Update tabs
@@ -723,6 +756,21 @@ class VisualizerApp {
         // Update legends
         document.getElementById('memory-legend-lifetime').style.display = mode === 'lifetime' ? 'flex' : 'none';
         document.getElementById('memory-legend-layout').style.display = mode === 'layout' ? 'flex' : 'none';
+        const transferLegend = document.getElementById('memory-legend-transfer');
+        if (transferLegend) {
+            transferLegend.style.display = mode === 'transfer' ? 'flex' : 'none';
+        }
+
+        // Show/hide transfer options
+        const transferOpts = document.getElementById('transfer-options');
+        if (transferOpts) {
+            transferOpts.style.display = mode === 'transfer' ? 'flex' : 'none';
+        }
+
+        // Load transfer data if needed
+        if (mode === 'transfer' && !this.transferData) {
+            await this.loadTransferData();
+        }
 
         this.renderMemoryChart();
     }
@@ -730,6 +778,8 @@ class VisualizerApp {
     renderMemoryChart() {
         if (this.memoryViewMode === 'layout') {
             this.renderMemoryLayoutChart();
+        } else if (this.memoryViewMode === 'transfer') {
+            this.renderTransferChart();
         } else {
             this.renderMemoryLifetimeChart();
         }
@@ -1034,6 +1084,191 @@ class VisualizerApp {
                 const tensor = eventData.points[0].customdata;
                 if (tensor && tensor.name) {
                     this.highlightGraphNode(tensor.name);
+                }
+            });
+        });
+    }
+
+    renderTransferChart() {
+        // Transfer timeline view: shows Load/Store nodes along execution timeline
+        if (!this.transferData) {
+            document.getElementById('memory-chart').innerHTML =
+                '<div class="no-model"><div>Set on-chip memory limit and click Apply</div></div>';
+            return;
+        }
+
+        if (this.transferData.error) {
+            document.getElementById('memory-chart').innerHTML =
+                `<div class="no-model"><div>${this.transferData.error}</div></div>`;
+            return;
+        }
+
+        const transfers = this.transferData.transfers || [];
+        const summary = this.transferData.summary || {};
+
+        if (transfers.length === 0) {
+            document.getElementById('memory-chart').innerHTML =
+                '<div class="no-model"><div>No transfers needed (all fits on-chip)</div></div>';
+            return;
+        }
+
+        // Update stats
+        const peakEl = document.getElementById('mem-peak');
+        if (peakEl && summary.peak_on_chip_kb !== undefined) {
+            peakEl.textContent = summary.peak_on_chip_kb.toFixed(1);
+        }
+
+        // Separate loads and stores
+        const loads = transfers.filter(t => t.type === 'load');
+        const stores = transfers.filter(t => t.type === 'store');
+
+        // Find max step for x-axis
+        const maxStep = Math.max(
+            ...transfers.map(t => t.insert_before || 0),
+            ...transfers.map(t => t.trigger_step || 0)
+        ) + 2;
+
+        const traces = [];
+
+        // Load traces (green arrows pointing up - DDR to SRAM)
+        loads.forEach((t, i) => {
+            const isHighlighted = this.selectedNode && t.tensor === this.selectedNode.name;
+            const color = isHighlighted ? '#fbbf24' : (t.is_overwrite ? '#8b5cf6' : '#10b981');
+            const triggerX = t.trigger_step;
+            const insertX = t.insert_before;
+
+            // Arrow from trigger to insert
+            traces.push({
+                x: [triggerX, insertX],
+                y: [i, i],
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: color, width: 2 },
+                marker: {
+                    symbol: ['circle', 'triangle-right'],
+                    size: [6, 10],
+                    color: color
+                },
+                hovertemplate: `<b>Load: ${t.tensor}</b><br>Size: ${t.size_kb.toFixed(2)} KB<br>Latency: ${t.latency_us.toFixed(2)} us<br>Trigger: Step ${triggerX.toFixed(1)}<br>Ready: Step ${insertX}${t.is_overwrite ? '<br>Overwrites: ' + t.overwrites : ''}<extra></extra>`,
+                showlegend: false,
+                name: `load_${t.tensor}`,
+            });
+
+            // Label
+            traces.push({
+                x: [(triggerX + insertX) / 2],
+                y: [i + 0.3],
+                type: 'scatter',
+                mode: 'text',
+                text: [t.tensor.length > 12 ? t.tensor.slice(0, 10) + '..' : t.tensor],
+                textfont: { size: 9, color: '#94a3b8' },
+                showlegend: false,
+                hoverinfo: 'skip',
+            });
+        });
+
+        // Store traces (red arrows - at bottom)
+        const storeOffset = loads.length + 1;
+        stores.forEach((t, i) => {
+            const isHighlighted = this.selectedNode && t.tensor === this.selectedNode.name;
+            const color = isHighlighted ? '#fbbf24' : '#ef4444';
+            const triggerX = t.trigger_step;
+            const insertX = t.insert_before;
+
+            traces.push({
+                x: [triggerX, insertX],
+                y: [storeOffset + i, storeOffset + i],
+                type: 'scatter',
+                mode: 'lines+markers',
+                line: { color: color, width: 2, dash: 'dot' },
+                marker: {
+                    symbol: ['circle', 'triangle-right'],
+                    size: [6, 10],
+                    color: color
+                },
+                hovertemplate: `<b>Store: ${t.tensor}</b><br>Size: ${t.size_kb.toFixed(2)} KB<br>Latency: ${t.latency_us.toFixed(2)} us<br>Trigger: Step ${triggerX.toFixed(1)}<extra></extra>`,
+                showlegend: false,
+                name: `store_${t.tensor}`,
+            });
+        });
+
+        // Add separator line between loads and stores
+        if (stores.length > 0 && loads.length > 0) {
+            traces.push({
+                x: [-0.5, maxStep],
+                y: [loads.length + 0.5, loads.length + 0.5],
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: 'rgba(255,255,255,0.2)', width: 1, dash: 'dash' },
+                showlegend: false,
+                hoverinfo: 'skip',
+            });
+        }
+
+        const totalRows = loads.length + stores.length + (stores.length > 0 ? 1 : 0);
+
+        const layout = {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            margin: { t: 10, r: 20, b: 30, l: 40 },
+            xaxis: {
+                title: { text: 'Execution Step', font: { size: 11, color: '#94a3b8' } },
+                color: '#94a3b8',
+                gridcolor: 'rgba(255,255,255,0.05)',
+                range: [-0.5, maxStep],
+                dtick: 1,
+            },
+            yaxis: {
+                color: '#94a3b8',
+                gridcolor: 'rgba(255,255,255,0.03)',
+                range: [-0.5, totalRows + 0.5],
+                showticklabels: false,
+            },
+            hovermode: 'closest',
+            annotations: [
+                {
+                    x: -0.3,
+                    y: loads.length / 2,
+                    text: 'Load',
+                    showarrow: false,
+                    font: { size: 10, color: '#10b981' },
+                    textangle: -90,
+                },
+            ],
+        };
+
+        if (stores.length > 0) {
+            layout.annotations.push({
+                x: -0.3,
+                y: storeOffset + stores.length / 2,
+                text: 'Store',
+                showarrow: false,
+                font: { size: 10, color: '#ef4444' },
+                textangle: -90,
+            });
+        }
+
+        // Add summary annotation
+        layout.annotations.push({
+            x: maxStep - 0.5,
+            y: totalRows,
+            xanchor: 'right',
+            yanchor: 'top',
+            text: `Total: ${summary.total_transfers} transfers | ${summary.total_load_kb?.toFixed(1) || 0} KB load | ${summary.total_store_kb?.toFixed(1) || 0} KB store | ${summary.total_latency_us?.toFixed(1) || 0} us`,
+            showarrow: false,
+            font: { size: 9, color: '#64748b' },
+        });
+
+        Plotly.newPlot('memory-chart', traces, layout, {
+            responsive: true,
+            displayModeBar: false,
+        }).then(() => {
+            const chartEl = document.getElementById('memory-chart');
+            chartEl.on('plotly_click', (eventData) => {
+                const point = eventData.points[0];
+                if (point && point.data.name) {
+                    const tensorName = point.data.name.replace(/^(load|store)_/, '');
+                    this.highlightGraphNode(tensorName);
                 }
             });
         });

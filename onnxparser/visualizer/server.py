@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from .layout import GraphLayoutEngine
-from .manager import ModelManager, get_manager
+from .manager import get_manager
 from .memory_wrapper import MemoryAnalyzerWrapper
 
 
@@ -74,6 +74,31 @@ def create_app() -> Flask:
     @app.route("/api/strategies", methods=["GET"])
     def list_strategies():
         return jsonify({"strategies": MemoryAnalyzerWrapper.list_strategies()})
+
+    @app.route("/api/transfers", methods=["GET"])
+    def get_transfers():
+        """Get memory transfer schedule with Load/Store nodes"""
+        name = request.args.get("name")
+        on_chip_kb = request.args.get("on_chip_kb", type=float)
+        strategy = request.args.get("strategy", "no_reuse")
+        enable_store = request.args.get("enable_store", "true").lower() == "true"
+        trace_mode = request.args.get("trace_mode", "false").lower() == "true"
+
+        if not name:
+            return jsonify({"error": "Missing model name"}), 400
+        if not on_chip_kb:
+            return jsonify({"error": "Missing on_chip_kb parameter"}), 400
+
+        data = manager.get_transfer_schedule(
+            name,
+            on_chip_size_kb=on_chip_kb,
+            strategy=strategy,
+            enable_store=enable_store,
+            trace_mode=trace_mode,
+        )
+        if data:
+            return jsonify(data)
+        return jsonify({"error": f"Model '{name}' not found"}), 404
 
     @app.route("/api/layout", methods=["POST"])
     def compute_layout():

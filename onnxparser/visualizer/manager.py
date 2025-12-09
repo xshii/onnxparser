@@ -8,7 +8,7 @@ import torch.fx as fx
 
 from .extractor import GraphExtractor
 from .layout import GraphLayoutEngine
-from .memory_wrapper import MemoryAnalyzerWrapper
+from .memory_wrapper import MemoryAnalyzerWrapper, MemoryTransferWrapper
 
 
 class ModelManager:
@@ -81,6 +81,39 @@ class ModelManager:
         gm = self.models[name]
         input_data = self.input_data.get(name)
         data = MemoryAnalyzerWrapper.analyze(gm, strategy, input_data, memory_limit_kb)
+        self.cache[cache_key] = data
+        return data
+
+    def get_transfer_schedule(
+        self,
+        name: str,
+        on_chip_size_kb: float,
+        strategy: str = "greedy",
+        enable_store: bool = True,
+        trace_mode: bool = False,
+    ) -> Optional[Dict]:
+        """Get memory transfer schedule for a model"""
+        if name not in self.models:
+            return None
+
+        # Include all params in cache key
+        store_str = "store" if enable_store else "nostore"
+        trace_str = "trace" if trace_mode else "notrace"
+        cache_key = f"{name}_transfers_{on_chip_size_kb}_{strategy}_{store_str}_{trace_str}"
+
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        gm = self.models[name]
+        input_data = self.input_data.get(name)
+        data = MemoryTransferWrapper.schedule_transfers(
+            gm,
+            on_chip_size_kb=on_chip_size_kb,
+            strategy=strategy,
+            enable_store=enable_store,
+            trace_mode=trace_mode,
+            input_data=input_data,
+        )
         self.cache[cache_key] = data
         return data
 
