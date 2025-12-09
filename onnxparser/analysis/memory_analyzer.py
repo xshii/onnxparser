@@ -381,16 +381,13 @@ class MemoryAnalyzer:
         # Initialize strategy
         self.strategy.reset()
 
-        # For static strategy, pre-compute offsets with full lifetime info
-        if self.strategy_name == "static":
-            from .strategies import StaticAllocationStrategy
-            if isinstance(self.strategy, StaticAllocationStrategy):
-                non_weight_tensors = [t for t in tensors.values() if not t.is_weight]
-                self.strategy.precompute_offsets(non_weight_tensors, self.constraint.alignment)
-
         for step, node in enumerate(self.gm.graph.nodes):
             if node.op == "output":
                 continue
+
+            # Set current step for delay-based reuse check
+            if hasattr(self.strategy, 'set_step'):
+                self.strategy.set_step(step)
 
             step_info = StepMemoryInfo(
                 step=step,
@@ -433,7 +430,7 @@ class MemoryAnalyzer:
                     )
                     output_tensor.memory_offset = result.offset
                     output_tensor.reused_from = result.reused_from
-                    output_tensor.is_inplace = result.is_inplace
+                    output_tensor.is_inplace = getattr(result, 'is_inplace', False)
                     step_info.reused_from = result.reused_from
                     step_info.exceeded_limit = result.exceeded_limit
 

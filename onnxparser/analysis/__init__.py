@@ -9,16 +9,10 @@ from .memory_analyzer import (
     AnalysisResult,
 )
 from .strategies import (
-    AllocationStrategy,
+    ReuseConfig,
     AllocationResult,
     MemoryBlock,
-    MemoryExceededError,
-    NoReuseStrategy,
-    GreedyReuseStrategy,
-    InplaceStrategy,
-    BestFitStrategy,
-    FirstFitStrategy,
-    StaticAllocationStrategy,
+    DelayBasedStrategy,
     StrategyRegistry,
 )
 from .spill_scheduler import (
@@ -38,18 +32,11 @@ __all__ = [
     "TensorInfo",
     "StepMemoryInfo",
     "AnalysisResult",
-    # Strategy base
-    "AllocationStrategy",
+    # Strategy
+    "ReuseConfig",
     "AllocationResult",
     "MemoryBlock",
-    "MemoryExceededError",
-    # Strategies
-    "NoReuseStrategy",
-    "GreedyReuseStrategy",
-    "InplaceStrategy",
-    "BestFitStrategy",
-    "FirstFitStrategy",
-    "StaticAllocationStrategy",
+    "DelayBasedStrategy",
     "StrategyRegistry",
     # Spill Scheduler
     "SpillScheduler",
