@@ -352,6 +352,42 @@ header h1 {
     cursor: pointer;
 }
 
+.memory-constraint {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.memory-constraint label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #94a3b8;
+}
+
+.memory-constraint input[type="number"] {
+    padding: 4px 8px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 4px;
+    color: #e2e8f0;
+    font-size: 11px;
+    width: 80px;
+}
+
+.memory-constraint input[type="number"]:focus {
+    border-color: #f59e0b;
+    outline: none;
+}
+
+.memory-constraint input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    accent-color: #f59e0b;
+    cursor: pointer;
+}
+
 .memory-stats {
     display: flex;
     gap: 20px;

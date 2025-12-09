@@ -737,6 +737,16 @@ class VisualizerApp {
         tensors.sort((a, b) => a.birth - b.birth);
         const maxStep = Math.max(...tensors.map(t => t.death)) + 1;
 
+        // Build memory usage timeline for stacked area chart
+        const timeline = this.memoryData.timeline || [];
+        let memoryTimeline = [];
+        if (timeline.length > 0) {
+            memoryTimeline = timeline.map(t => ({
+                step: t.step,
+                memory_kb: (t.max_memory || 0) / 1024
+            }));
+        }
+
         const traces = tensors.map((t) => {
             let color;
             const isHighlighted = this.selectedNode && t.name === this.selectedNode.name;
@@ -789,7 +799,26 @@ class VisualizerApp {
             },
             barmode: 'overlay',
             hovermode: 'closest',
+            shapes: [],
         };
+
+        // Add memory limit line if enabled
+        const limitInput = document.getElementById('memory-limit');
+        const showLimit = document.getElementById('show-limit');
+        if (showLimit && showLimit.checked && limitInput && limitInput.value) {
+            const limitKB = parseFloat(limitInput.value);
+            if (limitKB > 0) {
+                // For lifetime chart, we show peak memory vs limit
+                const peakKB = this.memoryData.summary.peak_min_kb;
+                const exceedsLimit = peakKB > limitKB;
+
+                // Update the peak display color based on limit
+                const peakEl = document.getElementById('mem-peak');
+                if (peakEl) {
+                    peakEl.style.color = exceedsLimit ? '#ef4444' : '#10b981';
+                }
+            }
+        }
 
         Plotly.newPlot('memory-chart', traces, layout, {
             responsive: true,
@@ -877,6 +906,16 @@ class VisualizerApp {
         const maxAddress = Math.max(...allocations.map(t => t.address + t.size));
         const maxTid = Math.max(...allocations.map(t => t.tid)) + 2;
 
+        // Check for memory limit
+        const limitInput = document.getElementById('memory-limit');
+        const showLimit = document.getElementById('show-limit');
+        let limitBytes = null;
+        if (showLimit && showLimit.checked && limitInput && limitInput.value) {
+            limitBytes = parseFloat(limitInput.value) * 1024;  // KB to bytes
+        }
+
+        const yMax = limitBytes ? Math.max(maxAddress * 1.05, limitBytes * 1.1) : maxAddress * 1.05;
+
         const layout = {
             paper_bgcolor: 'transparent',
             plot_bgcolor: 'transparent',
@@ -892,11 +931,45 @@ class VisualizerApp {
                 title: { text: 'Address (bytes)', font: { size: 11, color: '#94a3b8' } },
                 color: '#94a3b8',
                 gridcolor: 'rgba(255,255,255,0.05)',
-                range: [0, maxAddress * 1.05],
+                range: [0, yMax],
                 tickformat: '.2s',
             },
             hovermode: 'closest',
+            shapes: [],
+            annotations: [],
         };
+
+        // Add memory limit line if enabled
+        if (limitBytes) {
+            layout.shapes.push({
+                type: 'line',
+                x0: -0.5,
+                x1: maxTid,
+                y0: limitBytes,
+                y1: limitBytes,
+                line: {
+                    color: '#ef4444',
+                    width: 2,
+                    dash: 'dash'
+                }
+            });
+            layout.annotations.push({
+                x: maxTid - 0.5,
+                y: limitBytes,
+                xanchor: 'right',
+                yanchor: 'bottom',
+                text: `Limit: ${(limitBytes/1024).toFixed(1)} KB`,
+                showarrow: false,
+                font: { size: 10, color: '#ef4444' }
+            });
+
+            // Check if any allocation exceeds limit
+            const exceedsLimit = maxAddress > limitBytes;
+            const peakEl = document.getElementById('mem-peak');
+            if (peakEl) {
+                peakEl.style.color = exceedsLimit ? '#ef4444' : '#10b981';
+            }
+        }
 
         Plotly.newPlot('memory-chart', traces, layout, {
             responsive: true,
